@@ -101,14 +101,20 @@ struct FoveatedRender
 		bool neuralRenderingUICorrection = false;
 		// Eye tracking foveation
 		uint eyeTrackingFoveationEnabled = 0;  // Toggle for dynamic gaze-based foveation
-		float eyeTrackingGazeSmoothingAlpha = 0.2f;  // Temporal smoothing [0..1]
-		float eyeTrackingGazeThresholdPixels = 2.0f;  // Deadzone filter (pixels)
 		uint eyeTrackingDebugOverlay = 0;  // 0=off, 1=crosshair, 2=crosshair + vignette mask
 		// Per-eye calibration bias (NDC units): subtracted from the raw gaze
 		// before smoothing. Compensates a tracker that reads off-center when
 		// the user looks straight ahead.
 		float eyeTrackingBiasX = 0.0f;   // [-0.5, 0.5]
 		float eyeTrackingBiasY = 0.0f;   // [-0.5, 0.5]
+		// Gaze drift (pixels) required before the FOV subrect moves. Every move
+		// resets DLSS temporal history, so a high threshold keeps the region
+		// stable through natural pupil drift; low = more responsive, more churn.
+		float eyeTrackingFovMoveThresholdPx = 60.0f;  // [0, 120]
+		// Fraction of the remaining gaze offset applied per frame once the
+		// threshold trips. 1.0 = jump instantly (max DLSS history churn);
+		// lower values glide the region, spreading the churn over frames.
+		float eyeTrackingFovGlideFactor = 0.05f;  // (0, 1]
 	};
 
 	inline static constexpr Util::Settings::RestartTable<Settings, 1> kRestartFields{ {
@@ -134,6 +140,20 @@ struct FoveatedRender
 	// under convergence.
 	float lastGazeOffsetUV[2] = { 0.0f, 0.0f };
 	float lastGazeOffsetRightUV[2] = { 0.0f, 0.0f };
+
+	/**
+	 * @brief Current gaze-following subrect offset for one eye, in NDC units.
+	 *
+	 * Streamline consumes this as cameraPinholeOffset: a subrect shifted by Δ
+	 * NDC is optically equivalent to a camera whose principal point moved by
+	 * Δ, so DLSS can reproject its temporal history across subrect moves
+	 * instead of discarding it. Returns zeros when eye tracking is off.
+	 */
+	float2 GetGazeOffsetNDC(uint32_t eyeIndex) const
+	{
+		const float* off = (eyeIndex == 1) ? lastGazeOffsetRightUV : lastGazeOffsetUV;
+		return { off[0], off[1] };
+	}
 
 	// True for the frame in which the gaze-following offset moved the subrect.
 	// Consumers whose guides were cropped at the previous position (e.g.

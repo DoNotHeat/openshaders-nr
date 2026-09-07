@@ -41,11 +41,11 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingAutoMask,
 	neuralRenderingUICorrection,
 	eyeTrackingFoveationEnabled,
-	eyeTrackingGazeSmoothingAlpha,
-	eyeTrackingGazeThresholdPixels,
 	eyeTrackingDebugOverlay,
 	eyeTrackingBiasX,
-	eyeTrackingBiasY);
+	eyeTrackingBiasY,
+	eyeTrackingFovMoveThresholdPx,
+	eyeTrackingFovGlideFactor);
 
 // ============================================================================
 // Lifecycle
@@ -139,11 +139,11 @@ void FoveatedRender::ClampSettings()
 	settings.neuralRenderingSkinStructure = std::clamp(settings.neuralRenderingSkinStructure, 0.0f, 2.0f);
 	settings.neuralRenderingStyle = std::min(settings.neuralRenderingStyle, 3u);
 	settings.eyeTrackingFoveationEnabled = std::min(settings.eyeTrackingFoveationEnabled, 1u);
-	settings.eyeTrackingGazeSmoothingAlpha = std::clamp(settings.eyeTrackingGazeSmoothingAlpha, 0.0f, 1.0f);
-	settings.eyeTrackingGazeThresholdPixels = std::clamp(settings.eyeTrackingGazeThresholdPixels, 0.0f, 10.0f);
 	settings.eyeTrackingDebugOverlay = std::min(settings.eyeTrackingDebugOverlay, 2u);
 	settings.eyeTrackingBiasX = std::clamp(settings.eyeTrackingBiasX, -0.5f, 0.5f);
 	settings.eyeTrackingBiasY = std::clamp(settings.eyeTrackingBiasY, -0.5f, 0.5f);
+	settings.eyeTrackingFovMoveThresholdPx = std::clamp(settings.eyeTrackingFovMoveThresholdPx, 0.0f, 120.0f);
+	settings.eyeTrackingFovGlideFactor = std::clamp(settings.eyeTrackingFovGlideFactor, 0.05f, 1.0f);
 	// Preset clamping reads from Upscaling::Settings now.
 	auto& sharedPreset = globals::features::upscaling.settings.presetDLSS;
 	sharedPreset = std::min(sharedPreset, 5u);
@@ -255,7 +255,11 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	// frame unconditionally: a deadzone gate here makes the smoothed point
 	// freeze on sub-threshold jitter then jump when the threshold trips,
 	// which reads as erratic "chaotic" motion on a running mock source.
-	// Constant EMA keeps the overlay tracing the gaze smoothly.
+	// Constant EMA keeps the overlay tracing the gaze smoothly. The alpha is
+	// fixed (not user-tunable): the subrect's movement responsiveness is
+	// governed by FOV Move Threshold + Glide Factor below, and a second
+	// smoothing knob on the same motion read as a duplicate.
+	constexpr float kGazeSmoothingAlpha = 0.2f;
 	// Per-eye calibration bias: subtract before smoothing so the whole
 	// pipeline (overlay, subrect offset) sees the corrected point.
 	const float bias[2] = { settings.eyeTrackingBiasX, settings.eyeTrackingBiasY };
@@ -265,7 +269,7 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 		float* published = (eye == 0) ? eyeTrackingData.gazeNDCLeft : eyeTrackingData.gazeNDCRight;
 
 		const float corrected[2] = { raw[0] - bias[0], raw[1] - bias[1] };
-		FoveatedRenderEyeTracking::SmoothGazePoint(corrected, smoothed, settings.eyeTrackingGazeSmoothingAlpha, smoothed);
+		FoveatedRenderEyeTracking::SmoothGazePoint(corrected, smoothed, kGazeSmoothingAlpha, smoothed);
 		published[0] = smoothed[0];
 		published[1] = smoothed[1];
 	}
@@ -295,24 +299,38 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	const float eyeWidthPx = std::max(1.0f, renderSize.x * 0.5f);
 	const float eyeHeightPx = std::max(1.0f, renderSize.y);
 
-	// Movement threshold in pixels. Must be comfortably above tracker noise so
-	// a still gaze never trips it; large enough that the subrect moves only on
-	// deliberate gaze shifts. Evaluated per eye: under convergence the eyes'
-	// offsets move independently, and either eye's move must update its square.
-	constexpr float kGazeMoveThresholdPx = 12.0f;
+	// Movement threshold in pixels — user-tunable. Must be comfortably above
+	// tracker noise so a still gaze never trips it; large enough that the
+	// subrect moves only on deliberate gaze shifts. Evaluated per eye: under
+	// convergence the eyes' offsets move independently, and either eye's move
+	// must update its square.
+	const float moveThresholdPx = settings.eyeTrackingFovMoveThresholdPx;
 	auto gazeMovedPx = [&](const float* off, const float* last) {
 		const float dxPx = (off[0] - last[0]) * eyeWidthPx;
 		const float dyPx = (off[1] - last[1]) * eyeHeightPx;
 		return std::sqrt(dxPx * dxPx + dyPx * dyPx);
 	};
-	subrectMovedThisFrame = gazeMovedPx(offsetL, lastGazeOffsetUV) >= kGazeMoveThresholdPx ||
-	                        gazeMovedPx(offsetR, lastGazeOffsetRightUV) >= kGazeMoveThresholdPx;
+	const bool leftMoved = gazeMovedPx(offsetL, lastGazeOffsetUV) >= moveThresholdPx;
+	const bool rightMoved = gazeMovedPx(offsetR, lastGazeOffsetRightUV) >= moveThresholdPx;
+	subrectMovedThisFrame = leftMoved || rightMoved;
 	if (subrectMovedThisFrame) {
-		lastGazeOffsetUV[0] = offsetL[0];
-		lastGazeOffsetUV[1] = offsetL[1];
-		lastGazeOffsetRightUV[0] = offsetR[0];
-		lastGazeOffsetRightUV[1] = offsetR[1];
-		subrectController.SetGazeOffset(offsetL[0], -offsetL[1], offsetR[0], -offsetR[1]);
+		// Glide toward the target instead of jumping: apply a fraction of the
+		// remaining distance per frame. A jump re-positions the crop window over
+		// different world content in one step, forcing a full DLSS history reset
+		// (visible as a lurch); gliding spreads the same repositioning over a
+		// few frames so each step is small enough that DLSS's per-frame reset
+		// barely reads as softness rather than a visible rebuild.
+		const float glide = settings.eyeTrackingFovGlideFactor;
+		auto glideToward = [&](float* last, const float* target) {
+			last[0] += (target[0] - last[0]) * glide;
+			last[1] += (target[1] - last[1]) * glide;
+		};
+		if (leftMoved)
+			glideToward(lastGazeOffsetUV, offsetL);
+		if (rightMoved)
+			glideToward(lastGazeOffsetRightUV, offsetR);
+		subrectController.SetGazeOffset(lastGazeOffsetUV[0], -lastGazeOffsetUV[1],
+			lastGazeOffsetRightUV[0], -lastGazeOffsetRightUV[1]);
 	}
 
 	eyeTrackingData.isValid = true;
@@ -679,17 +697,29 @@ void FoveatedRender::DrawSettings()
 			settings.eyeTrackingFoveationEnabled = eyeTrackingBool ? 1u : 0u;
 
 		if (settings.eyeTrackingFoveationEnabled) {
-			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_smoothing"), "Gaze Smoothing"),
-				&settings.eyeTrackingGazeSmoothingAlpha, 0.0f, 1.0f, "%.2f");
-			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_threshold"), "Gaze Threshold"),
-				&settings.eyeTrackingGazeThresholdPixels, 0.0f, 10.0f, "%.1f px");
-
 			// Calibration bias: shift the tracked point until the crosshair
 			// sits where you actually look when gazing straight ahead.
 			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_bias_x"), "Calibration Bias X"),
 				&settings.eyeTrackingBiasX, -0.5f, 0.5f, "%.3f");
 			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_bias_y"), "Calibration Bias Y"),
 				&settings.eyeTrackingBiasY, -0.5f, 0.5f, "%.3f");
+
+			// FOV region movement: how far the gaze must drift before the
+			// high-quality region repositions, and how fast it glides there.
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", "Gaze drift (pixels) required before the FOV region moves.\n"
+					"Higher = natural pupil drift never re-renders the region\n"
+					"(DLSS history stays stable); lower = more responsive.");
+			}
+			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_fov_threshold"), "FOV Move Threshold"),
+				&settings.eyeTrackingFovMoveThresholdPx, 0.0f, 120.0f, "%.0f px");
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", "Fraction of the remaining distance the region covers\n"
+					"per frame once the threshold trips. 1.0 snaps instantly\n"
+					"(visible lurch); lower values glide smoothly.");
+			}
+			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_fov_glide"), "FOV Glide Factor"),
+				&settings.eyeTrackingFovGlideFactor, 0.05f, 1.0f, "%.2f");
 
 			const char* overlayModes[] = { "Off", "Crosshair", "Crosshair + Mask" };
 			int overlay = static_cast<int>(settings.eyeTrackingDebugOverlay);

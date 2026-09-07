@@ -97,6 +97,13 @@ public:
 	Util::FrameChecker frameChecker;
 	sl::FrameToken* frameToken = nullptr;
 
+	// Previous frame's gaze-following subrect offset per eye (NDC units), for
+	// the clipToPrevClip pinhole compensation in CheckFrameConstants. DLSS
+	// reprojects history through prev-vs-curr camera transforms; feeding the
+	// subrect move into those transforms keeps the history valid across gaze
+	// shifts instead of forcing a history reset.
+	float2 prevGazeOffsetNDC[2] = { { 0.0f, 0.0f }, { 0.0f, 0.0f } };
+
 	struct ReflexOptionsCache
 	{
 		bool valid = false;

@@ -470,6 +470,27 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, uint32_t eye
 		sl::float4x4 currViewProjSL = *(sl::float4x4*)&currViewProj;
 		sl::float4x4 prevViewProjSL = *(sl::float4x4*)&prevViewProj;
 
+		// Gaze-following foveation shifts the DLSS crop window by Δ NDC. Optically
+		// that is a camera whose principal point moved by Δ, so fold the shift into
+		// the projection matrices: curr gets the current offset, prev gets LAST
+		// frame's offset. DLSS then reprojects its history across subrect moves as
+		// ordinary camera rotation — no history reset, no ghosting. The pinhole
+		// offset sign convention: a window shifted +Δ samples content that a
+		// camera with principal point -Δ would project there.
+		const uint32_t eyeIdx = std::min(eyeIndex, 1u);
+		const float2 gazeOffset = globals::features::upscaling.foveatedRender.GetGazeOffsetNDC(eyeIdx);
+		const float2 prevGazeOffset = prevGazeOffsetNDC[eyeIdx];
+		prevGazeOffsetNDC[eyeIdx] = gazeOffset;
+		const auto applyPinhole = [](sl::float4x4& m, const float2& off) {
+			// Row-major projection: x_clip = m[0]·p + m[0].w, y_clip = m[1]·p + m[1].w.
+			// Shifting the principal point by +off moves the projected point by
+			// -off·w_clip, matching a crop window sampled at +off.
+			m[0].w += off.x;
+			m[1].w -= off.y;
+		};
+		applyPinhole(currViewProjSL, gazeOffset);
+		applyPinhole(prevViewProjSL, prevGazeOffset);
+
 		sl::float4x4 invCurrViewProj;
 		sl::matrixFullInvert(invCurrViewProj, currViewProjSL);
 		sl::matrixMul(slConstants.clipToPrevClip, invCurrViewProj, prevViewProjSL);
@@ -483,12 +504,10 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, uint32_t eye
 	slConstants.jitterOffset = { -jitter.x, -jitter.y };
 	// Menus render no motion vectors; camera-derived MVs restore valid reprojection there.
 	// Reset only when that fill couldn't run — accumulating against zero MVs ghosts.
-	// Gaze-following foveation: a subrect move repositions the crop window over
-	// different world content while DLSS's temporal history still describes the
-	// OLD window — reprojection then ghosts for several frames. Reset the
-	// history on the move frame so DLSS re-seeds cleanly instead of smearing.
-	slConstants.reset = (state->IsMainOrLoadingMenuOpen() && !upscaling.menuCameraMVsValid) ||
-	                    globals::features::upscaling.foveatedRender.subrectMovedThisFrame ?
+	// Gaze-following foveation does NOT reset here: the subrect move is folded
+	// into the VR clipToPrevClip pinhole compensation above, so DLSS reprojects
+	// its history across gaze shifts as ordinary camera motion.
+	slConstants.reset = (state->IsMainOrLoadingMenuOpen() && !upscaling.menuCameraMVsValid) ?
 	                        sl::Boolean::eTrue :
 	                        sl::Boolean::eFalse;
 
