@@ -154,8 +154,23 @@ namespace Util::Subrect
 		StereoPixelRegions GetStereoPixelRegions(uint32_t fullWidth, uint32_t fullHeight) const;
 
 		/** @brief Get the current crop region in UV coordinates. */
-		const UVRegion& GetUV() const { return currentUV; }
-		const UVRegion& GetRightEyeUV() const { return stereoEnabled ? currentRightUV : currentUV; }
+		const UVRegion& GetUV() const { return gazeOffsetActive ? gazeShiftedUV : currentUV; }
+		const UVRegion& GetRightEyeUV() const { return gazeOffsetActive ? gazeShiftedRightUV : (stereoEnabled ? currentRightUV : currentUV); }
+
+		/**
+		 * @brief Set per-eye gaze-following offsets applied on top of the base crop.
+		 *
+		 * Unlike mutating the crop directly, this keeps the base region intact
+		 * (so presets and persisted settings are untouched) and applies a
+		 * per-frame offset that does not accumulate. Offsets are in UV units of
+		 * the per-eye region. Each eye is offset by ITS OWN gaze: the tracker
+		 * reports per-eye foveation centers that include convergence disparity
+		 * (a near gaze point projects to different NDC x per eye), so applying
+		 * one eye's offset to both leaves the other square over different world
+		 * content and its edges stop fusing (reads as two squares in the
+		 * headset). Pass (0,0,0,0) to clear the offsets.
+		 */
+		void SetGazeOffset(float offsetX, float offsetY, float rightOffsetX, float rightOffsetY);
 
 		/** @brief True while the user is actively drag-resizing the crop region. */
 		bool IsDragging() const { return isDraggingCrop; }
@@ -202,6 +217,13 @@ namespace Util::Subrect
 		UVRegion currentUV{};
 		UVRegion currentRightUV{};
 		bool stereoEnabled = false;
+		// Gaze-following offset applied on top of the base crop (see
+		// SetGazeOffset). Kept separate so it never accumulates or persists.
+		float gazeOffsetX = 0.0f;
+		float gazeOffsetY = 0.0f;
+		bool gazeOffsetActive = false;
+		UVRegion gazeShiftedUV{};
+		UVRegion gazeShiftedRightUV{};
 		// True once LoadSettings sees an explicit CropRight* key. Suppresses
 		// the auto-mirror in SetStereoEnabled(true) so a deliberate JSON
 		// right-eye crop survives a mono→stereo transition that happens

@@ -483,7 +483,12 @@ bool Streamline::CheckFrameConstants(sl::ViewportHandle p_viewport, uint32_t eye
 	slConstants.jitterOffset = { -jitter.x, -jitter.y };
 	// Menus render no motion vectors; camera-derived MVs restore valid reprojection there.
 	// Reset only when that fill couldn't run — accumulating against zero MVs ghosts.
-	slConstants.reset = (state->IsMainOrLoadingMenuOpen() && !upscaling.menuCameraMVsValid) ?
+	// Gaze-following foveation: a subrect move repositions the crop window over
+	// different world content while DLSS's temporal history still describes the
+	// OLD window — reprojection then ghosts for several frames. Reset the
+	// history on the move frame so DLSS re-seeds cleanly instead of smearing.
+	slConstants.reset = (state->IsMainOrLoadingMenuOpen() && !upscaling.menuCameraMVsValid) ||
+	                    globals::features::upscaling.foveatedRender.subrectMovedThisFrame ?
 	                        sl::Boolean::eTrue :
 	                        sl::Boolean::eFalse;
 

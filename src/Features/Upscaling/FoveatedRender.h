@@ -23,8 +23,11 @@
 
 #include "../../Utils/BootSnapshot.h"
 #include "../../Utils/Subrect.h"
+#include "EyeTrackingFoveation.h"
 
 #include <chrono>
+#include <d3d11.h>
+#include <winrt/base.h>
 
 struct FoveatedRender
 {
@@ -96,6 +99,16 @@ struct FoveatedRender
 		uint neuralRenderingStyle = 3;
 		bool neuralRenderingAutoMask = true;
 		bool neuralRenderingUICorrection = false;
+		// Eye tracking foveation
+		uint eyeTrackingFoveationEnabled = 0;  // Toggle for dynamic gaze-based foveation
+		float eyeTrackingGazeSmoothingAlpha = 0.2f;  // Temporal smoothing [0..1]
+		float eyeTrackingGazeThresholdPixels = 2.0f;  // Deadzone filter (pixels)
+		uint eyeTrackingDebugOverlay = 0;  // 0=off, 1=crosshair, 2=crosshair + vignette mask
+		// Per-eye calibration bias (NDC units): subtracted from the raw gaze
+		// before smoothing. Compensates a tracker that reads off-center when
+		// the user looks straight ahead.
+		float eyeTrackingBiasX = 0.0f;   // [-0.5, 0.5]
+		float eyeTrackingBiasY = 0.0f;   // [-0.5, 0.5]
 	};
 
 	inline static constexpr Util::Settings::RestartTable<Settings, 1> kRestartFields{ {
@@ -111,7 +124,21 @@ struct FoveatedRender
 	static constexpr const char* kPresetNasalConvergence50 = "Nasal Convergence 50%";  ///< 50% crop biased toward nasal convergence.
 
 	Settings settings;
+	FoveatedRenderEyeTracking::EyeTrackingData eyeTrackingData;  // Eye tracking state and gaze data
 	Util::Subrect::Controller subrectController;
+
+	// Last gaze offset applied to the subrect (UV units), used for hysteresis:
+	// the subrect only moves when the gaze drifts more than a threshold from
+	// this position, so a stationary gaze keeps the subrect (and DLSS temporal
+	// history) stable. Tracked per eye — the eyes' offsets move independently
+	// under convergence.
+	float lastGazeOffsetUV[2] = { 0.0f, 0.0f };
+	float lastGazeOffsetRightUV[2] = { 0.0f, 0.0f };
+
+	// True for the frame in which the gaze-following offset moved the subrect.
+	// Consumers whose guides were cropped at the previous position (e.g.
+	// NeuralRendering) skip that frame to stay aligned with the moved region.
+	bool subrectMovedThisFrame = false;
 
 	// Called from Upscaling::DrawSettings. DrawEnable renders the always-visible
 	// header + Enable checkbox at the parent's top level; DrawSettings renders
@@ -151,6 +178,13 @@ struct FoveatedRender
 		float2 centerOffsets[2] = {};        // [0]=left eye, [1]=right eye
 	};
 	FoveationProfile GetFoveationProfile() const;
+
+	// Eye tracking foveation: update gaze data and apply dynamic offset
+	void UpdateEyeTrackingFoveation();
+
+	// Debug overlay: draw the gaze crosshair (and optional vignette mask) onto
+	// the final VR SBS frame. Skeleton-stage validation of the gaze pipeline.
+	void DrawGazeDebugOverlay();
 
 	// Main enable: latched at boot, change requires restart
 	void LatchEnabled() { enabledAtBoot = (settings.enabled != 0); }

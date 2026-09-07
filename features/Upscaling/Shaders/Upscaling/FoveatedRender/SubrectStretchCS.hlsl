@@ -18,7 +18,11 @@ cbuffer StretchCB : register(b0)
 	uint StretchMode;     // 0=Bilinear, 1=Point, 2=GaussianBlur
 	float BlurRadius;     // Texel-space radius for Gaussian blur (typical 0.5-4.0)
 	uint DebugVisualize;  // 0=off, 1=tint stretched periphery red so the DLSS region pops
-	uint _pad;
+	float GazeX;          // per-eye gaze NDC x (for the debug overlay)
+	float GazeY;          // per-eye gaze NDC y (for the debug overlay)
+	uint GazeDebugMode;   // 0=none, 1=crosshair, 2=crosshair+vignette mask
+	uint _pad0;
+	uint _pad1;
 };
 
 Texture2D<float4> SrcTex : register(t0);
@@ -91,6 +95,40 @@ RWTexture2D<float4> DstTex : register(u0);
 	// reconstructing vs where the cheap stretch is filling.
 	if (DebugVisualize != 0) {
 		color.rgb = lerp(color.rgb, color.rgb * float3(1.6, 0.35, 0.35), 0.6);
+	}
+
+	// Gaze debug overlay — drawn here (same pass as the red tint above, i.e. a
+	// proven path to the final frame). Pixel is in the stretched periphery;
+	// this pass is per-pixel over the whole dest eye region per dispatch.
+	if (GazeDebugMode != 0) {
+		// Pixel NDC within this eye, y up, centered.
+		float ndcX = u * 2.0 - 1.0;
+		float ndcY = 1.0 - v * 2.0;
+
+		// Gaze point in dest pixels.
+		float2 gazePx = float2(
+			(GazeX * 0.5 + 0.5) * (float)DstWidth,
+			(0.5 - GazeY * 0.5) * (float)DstHeight);
+		float2 p = float2((float)tid.x, (float)tid.y);
+
+		// Crosshair (green) — always when overlay is on.
+		const float barHalfLen = 14.0;
+		const float barHalfThick = 1.8;
+		bool inHBar = abs(p.y - gazePx.y) <= barHalfThick && abs(p.x - gazePx.x) <= barHalfLen;
+		bool inVBar = abs(p.x - gazePx.x) <= barHalfThick && abs(p.y - gazePx.y) <= barHalfLen;
+		bool inDot = length(p - gazePx) <= 4.0;
+
+		if (inHBar || inVBar || inDot) {
+			color.rgb = lerp(color.rgb, float3(0.1, 1.0, 0.2), 0.85);
+		} else if (GazeDebugMode == 2) {
+			// Vignette mask: darken outside a soft ellipse around the gaze point.
+			float2 delta = float2(ndcX, ndcY) - float2(GazeX, GazeY);
+			const float rx = 0.45;
+			const float ry = 0.45;
+			float d = sqrt((delta.x * delta.x) / (rx * rx) + (delta.y * delta.y) / (ry * ry));
+			float m = smoothstep(1.0, 1.6, d);
+			color.rgb *= lerp(1.0, 0.15, m);
+		}
 	}
 
 	DstTex[uint2(tid.x + DstOffsetX, tid.y)] = color;

@@ -1,16 +1,21 @@
 #include "FoveatedRender.h"
 
 #include "../../Globals.h"
+#include "../../GpuPass.h"
 #include "../../I18n/I18n.h"
+#include "../../Utils/Game.h"
 #include "../../Utils/Subrect.h"
 #include "../../Utils/UI.h"
 #include "../FoveatedCommon.h"
 #include "../Upscaling.h"
+#include "EyeTrackingFoveation.h"
 #include "FoveatedRender/Core.h"
 #include "NeuralRendering/Integration.h"
 #include "NeuralRendering/Renderer.h"
+#include "../VR/EyeTrackingVR.h"
 
 #include <algorithm>
+#include <cmath>
 
 #define I18N_KEY_PREFIX "feature.upscaling."
 
@@ -34,7 +39,13 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingSkinStructure,
 	neuralRenderingStyle,
 	neuralRenderingAutoMask,
-	neuralRenderingUICorrection);
+	neuralRenderingUICorrection,
+	eyeTrackingFoveationEnabled,
+	eyeTrackingGazeSmoothingAlpha,
+	eyeTrackingGazeThresholdPixels,
+	eyeTrackingDebugOverlay,
+	eyeTrackingBiasX,
+	eyeTrackingBiasY);
 
 // ============================================================================
 // Lifecycle
@@ -127,6 +138,12 @@ void FoveatedRender::ClampSettings()
 	settings.neuralRenderingLocalStructure = std::clamp(settings.neuralRenderingLocalStructure, 0.0f, 2.0f);
 	settings.neuralRenderingSkinStructure = std::clamp(settings.neuralRenderingSkinStructure, 0.0f, 2.0f);
 	settings.neuralRenderingStyle = std::min(settings.neuralRenderingStyle, 3u);
+	settings.eyeTrackingFoveationEnabled = std::min(settings.eyeTrackingFoveationEnabled, 1u);
+	settings.eyeTrackingGazeSmoothingAlpha = std::clamp(settings.eyeTrackingGazeSmoothingAlpha, 0.0f, 1.0f);
+	settings.eyeTrackingGazeThresholdPixels = std::clamp(settings.eyeTrackingGazeThresholdPixels, 0.0f, 10.0f);
+	settings.eyeTrackingDebugOverlay = std::min(settings.eyeTrackingDebugOverlay, 2u);
+	settings.eyeTrackingBiasX = std::clamp(settings.eyeTrackingBiasX, -0.5f, 0.5f);
+	settings.eyeTrackingBiasY = std::clamp(settings.eyeTrackingBiasY, -0.5f, 0.5f);
 	// Preset clamping reads from Upscaling::Settings now.
 	auto& sharedPreset = globals::features::upscaling.settings.presetDLSS;
 	sharedPreset = std::min(sharedPreset, 5u);
@@ -211,6 +228,103 @@ FoveatedRender::FoveationProfile FoveatedRender::GetFoveationProfile() const
 	profile.centerOffsets[0] = { (leftUV.x + leftUV.w * 0.5f) - 0.5f, (leftUV.y + leftUV.h * 0.5f) - 0.5f };
 	profile.centerOffsets[1] = { (rightUV.x + rightUV.w * 0.5f) - 0.5f, (rightUV.y + rightUV.h * 0.5f) - 0.5f };
 	return profile;
+}
+
+void FoveatedRender::UpdateEyeTrackingFoveation()
+{
+	// Skeleton stage: acquire gaze (mock source until OpenVR wiring lands),
+	// smooth it, publish the smoothed point for the debug overlay, and shift
+	// the high-quality subrect to follow the gaze.
+	if (!globals::game::isVR || !settings.eyeTrackingFoveationEnabled) {
+		subrectMovedThisFrame = false;
+		return;
+	}
+	static bool logOnce = false;
+	if (!logOnce) {
+		logger::info("[EYETRACK] UpdateEyeTrackingFoveation running (isVR={} enabled={})", globals::game::isVR, settings.eyeTrackingFoveationEnabled);
+		logOnce = true;
+	}
+
+	auto sample = FoveatedRenderEyeTracking::TryGetEyeTrackingData();
+	if (!sample.isValid) {
+		eyeTrackingData.isValid = false;
+		return;
+	}
+
+	// Per-eye temporal smoothing (exponential moving average). Applied every
+	// frame unconditionally: a deadzone gate here makes the smoothed point
+	// freeze on sub-threshold jitter then jump when the threshold trips,
+	// which reads as erratic "chaotic" motion on a running mock source.
+	// Constant EMA keeps the overlay tracing the gaze smoothly.
+	// Per-eye calibration bias: subtract before smoothing so the whole
+	// pipeline (overlay, subrect offset) sees the corrected point.
+	const float bias[2] = { settings.eyeTrackingBiasX, settings.eyeTrackingBiasY };
+	for (uint eye = 0; eye < 2; ++eye) {
+		const float* raw = (eye == 0) ? sample.gazeNDCLeft : sample.gazeNDCRight;
+		float* smoothed = (eye == 0) ? eyeTrackingData.smoothedGazeLeft : eyeTrackingData.smoothedGazeRight;
+		float* published = (eye == 0) ? eyeTrackingData.gazeNDCLeft : eyeTrackingData.gazeNDCRight;
+
+		const float corrected[2] = { raw[0] - bias[0], raw[1] - bias[1] };
+		FoveatedRenderEyeTracking::SmoothGazePoint(corrected, smoothed, settings.eyeTrackingGazeSmoothingAlpha, smoothed);
+		published[0] = smoothed[0];
+		published[1] = smoothed[1];
+	}
+
+	// Move the high-quality subrect to follow the gaze. The offset is in UV
+	// units of the per-eye region: GazeToSubrectOffset maps the clamped NDC
+	// gaze (-0.4..0.4) onto a max offset, so passing a UV-space max keeps the
+	// result in UV units. Gaze NDC y is up while UV y is down, so the Y offset
+	// is negated. SetGazeOffset applies the offset on top of the base crop
+	// (never accumulating) and mirrors the X offset for the right eye.
+	//
+	// Hysteresis: the subrect only moves when the gaze drifts more than a
+	// threshold (in pixels) from the last applied position. Every subrect move
+	// resets DLSS's temporal history, which reads as a flicker, so a stationary
+	// gaze must keep the subrect (and its history) perfectly still. Without
+	// this, tracker noise keeps nudging the subrect and DLSS never accumulates
+	// a stable history — constant shimmering as if DLSS were off.
+	const float maxSubrectOffsetUV = 0.3f;
+	float offsetL[2];
+	float offsetR[2];
+	FoveatedRenderEyeTracking::GazeToSubrectOffset(
+		eyeTrackingData.smoothedGazeLeft, maxSubrectOffsetUV, offsetL);
+	FoveatedRenderEyeTracking::GazeToSubrectOffset(
+		eyeTrackingData.smoothedGazeRight, maxSubrectOffsetUV, offsetR);
+
+	const auto renderSize = Util::ConvertToDynamic(globals::state->screenSize);
+	const float eyeWidthPx = std::max(1.0f, renderSize.x * 0.5f);
+	const float eyeHeightPx = std::max(1.0f, renderSize.y);
+
+	// Movement threshold in pixels. Must be comfortably above tracker noise so
+	// a still gaze never trips it; large enough that the subrect moves only on
+	// deliberate gaze shifts. Evaluated per eye: under convergence the eyes'
+	// offsets move independently, and either eye's move must update its square.
+	constexpr float kGazeMoveThresholdPx = 12.0f;
+	auto gazeMovedPx = [&](const float* off, const float* last) {
+		const float dxPx = (off[0] - last[0]) * eyeWidthPx;
+		const float dyPx = (off[1] - last[1]) * eyeHeightPx;
+		return std::sqrt(dxPx * dxPx + dyPx * dyPx);
+	};
+	subrectMovedThisFrame = gazeMovedPx(offsetL, lastGazeOffsetUV) >= kGazeMoveThresholdPx ||
+	                        gazeMovedPx(offsetR, lastGazeOffsetRightUV) >= kGazeMoveThresholdPx;
+	if (subrectMovedThisFrame) {
+		lastGazeOffsetUV[0] = offsetL[0];
+		lastGazeOffsetUV[1] = offsetL[1];
+		lastGazeOffsetRightUV[0] = offsetR[0];
+		lastGazeOffsetRightUV[1] = offsetR[1];
+		subrectController.SetGazeOffset(offsetL[0], -offsetL[1], offsetR[0], -offsetR[1]);
+	}
+
+	eyeTrackingData.isValid = true;
+}
+
+// The gaze debug overlay is drawn inside the foveated stretch pass
+	// (SubrectStretchCS.hlsl), i.e. the same compute shader that renders the
+	// red "Visualize regions" tint — the proven path to the final frame for
+	// this foveation route. This dedicated method is intentionally unused; it
+	// would paint kVR_FRAMEBUFFER too late (kMAIN is already folded into it).
+void FoveatedRender::DrawGazeDebugOverlay()
+{
 }
 
 void FoveatedRender::LatchQualityMode()
@@ -551,6 +665,57 @@ void FoveatedRender::DrawSettings()
 
 		if (subrectController.IsDragging())
 			lastDragTime = std::chrono::steady_clock::now();
+
+		// ── Eye Tracking (skeleton: mock source, debug overlay only) ──
+		ImGui::Separator();
+		ImGui::Text("%s", T(TKEY("foveated_eye_tracking_header"), "Eye Tracking Foveation"));
+		ImGui::TextWrapped(T(TKEY("foveated_eye_tracking_desc"),
+			"Development preview: a synthetic gaze source drives the pipeline. "
+			"Use the debug overlay to see the tracked point move in the headset. "
+			"Real headset eye tracking is not wired yet."));
+
+		bool eyeTrackingBool = settings.eyeTrackingFoveationEnabled != 0;
+		if (ImGui::Checkbox(T(TKEY("foveated_eye_tracking_enable"), "Enable Eye Tracking Pipeline"), &eyeTrackingBool))
+			settings.eyeTrackingFoveationEnabled = eyeTrackingBool ? 1u : 0u;
+
+		if (settings.eyeTrackingFoveationEnabled) {
+			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_smoothing"), "Gaze Smoothing"),
+				&settings.eyeTrackingGazeSmoothingAlpha, 0.0f, 1.0f, "%.2f");
+			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_threshold"), "Gaze Threshold"),
+				&settings.eyeTrackingGazeThresholdPixels, 0.0f, 10.0f, "%.1f px");
+
+			// Calibration bias: shift the tracked point until the crosshair
+			// sits where you actually look when gazing straight ahead.
+			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_bias_x"), "Calibration Bias X"),
+				&settings.eyeTrackingBiasX, -0.5f, 0.5f, "%.3f");
+			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_bias_y"), "Calibration Bias Y"),
+				&settings.eyeTrackingBiasY, -0.5f, 0.5f, "%.3f");
+
+			const char* overlayModes[] = { "Off", "Crosshair", "Crosshair + Mask" };
+			int overlay = static_cast<int>(settings.eyeTrackingDebugOverlay);
+			if (ImGui::Combo(T(TKEY("foveated_eye_tracking_overlay"), "Debug Overlay"), &overlay, overlayModes, IM_ARRAYSIZE(overlayModes)))
+				settings.eyeTrackingDebugOverlay = static_cast<uint>(overlay);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", T(TKEY("foveated_eye_tracking_overlay_tooltip"),
+									  "Crosshair: green cross at the tracked gaze point, per eye.\n"
+									  "Crosshair + Mask: also darkens everything outside the future\n"
+									  "foveated region around the gaze point."));
+			}
+
+			const char* sourceName = "None";
+			switch (FoveatedRenderEyeTracking::GetLastGazeSource()) {
+			case FoveatedRenderEyeTracking::GazeSource::kOpenVR:
+				sourceName = "OpenVR (headset)";
+				break;
+			case FoveatedRenderEyeTracking::GazeSource::kMock:
+				sourceName = "Mock (synthetic)";
+				break;
+			default:
+				break;
+			}
+			ImGui::TextDisabled("Gaze source: %s | valid: %s", sourceName,
+				eyeTrackingData.isValid ? "yes" : "no");
+		}
 	}
 }
 

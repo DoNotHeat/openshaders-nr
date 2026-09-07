@@ -444,6 +444,32 @@ namespace Util::Subrect
 		}
 	}
 
+	void Controller::SetGazeOffset(float offsetX, float offsetY, float rightOffsetX, float rightOffsetY)
+	{
+		gazeOffsetX = offsetX;
+		gazeOffsetY = offsetY;
+		gazeOffsetActive = (offsetX != 0.0f || offsetY != 0.0f || rightOffsetX != 0.0f || rightOffsetY != 0.0f);
+
+		if (!gazeOffsetActive) {
+			return;
+		}
+
+		// Shift each eye's region center by ITS OWN gaze offset, preserving
+		// size. UV y is down while gaze NDC y is up, so the caller passes
+		// y-inverted offsets; here we just apply them directly.
+		gazeShiftedUV = currentUV;
+		gazeShiftedUV.x = std::clamp(gazeShiftedUV.x + offsetX, 0.0f, 1.0f - gazeShiftedUV.w);
+		gazeShiftedUV.y = std::clamp(gazeShiftedUV.y + offsetY, 0.0f, 1.0f - gazeShiftedUV.h);
+
+		// Per-eye offsets keep both squares over the same WORLD region: the
+		// tracker's per-eye centers include convergence disparity, so a shared
+		// offset would center only one eye's square on the gazed object and the
+		// squares' edges would stop fusing (two visible squares).
+		gazeShiftedRightUV = stereoEnabled ? currentRightUV : currentUV;
+		gazeShiftedRightUV.x = std::clamp(gazeShiftedRightUV.x + rightOffsetX, 0.0f, 1.0f - gazeShiftedRightUV.w);
+		gazeShiftedRightUV.y = std::clamp(gazeShiftedRightUV.y + rightOffsetY, 0.0f, 1.0f - gazeShiftedRightUV.h);
+	}
+
 	void Controller::ClampCurrentUV()
 	{
 		currentUV = ClampUV(currentUV);

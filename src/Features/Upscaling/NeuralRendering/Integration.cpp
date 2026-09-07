@@ -175,6 +175,22 @@ namespace NeuralRendering
 		if (lastAppliedFrame == frame || (guideFrame != frame && !(frame > 0 && guideFrame == frame - 1)))
 			return false;
 
+		// Gaze-following foveation moves the subrect between frames. The
+		// depth/mvec guides were cropped at the PREVIOUS subrect position, so
+		// evaluating against a color crop at the NEW position misaligns the
+		// guides and writes a shifted duplicate region (a second visible
+		// "square" offset from the DLSS one). Skip any frame whose guides are
+		// one frame stale while the subrect moved this frame; the next frame
+		// re-crops guides at the new position and evaluation resumes aligned.
+		if (guideFrame != frame && foveated.subrectMovedThisFrame) {
+			static std::uint32_t lastSkipLogFrame = 0;
+			if (frame - lastSkipLogFrame > 300) {
+				lastSkipLogFrame = frame;
+				logger::info("[DLSSNR-DIAG] skipped NR eval frame={} guides={} (stale + subrect moved)", frame, guideFrame);
+			}
+			return false;
+		}
+
 		auto* renderer = globals::game::renderer;
 		auto* context = globals::d3d::context;
 		if (!renderer || !context || !globals::d3d::device ||
@@ -207,6 +223,19 @@ namespace NeuralRendering
 			const auto& uv = *eyeUVs[eye];
 			const std::uint32_t x = (eye ? eyeWidth : 0) + static_cast<std::uint32_t>(eyeWidth * uv.x);
 			const std::uint32_t y = static_cast<std::uint32_t>(totalDesc.Height * uv.y);
+
+			// Diagnostic: NR read/write position on kTOTAL, correlated by
+			// frame number with [FOVEATED-DIAG]. Per-eye statics: a shared
+			// timer would starve eye 1.
+			static std::chrono::steady_clock::time_point lastLog[2];
+			auto now = std::chrono::steady_clock::now();
+			if (now - lastLog[eye] > std::chrono::seconds(5)) {
+				lastLog[eye] = now;
+				logger::info("[DLSSNR-DIAG] NR writeback frame={} eye={} srcX={} srcY={} size={}x{} eyeWidth={} total={}x{} leftUV=({:.3f},{:.3f},{:.3f},{:.3f})",
+					frame, eye, x, y, outWidth, outHeight, eyeWidth, totalDesc.Width, totalDesc.Height,
+					leftUV.x, leftUV.y, leftUV.w, leftUV.h);
+			}
+
 			float motionScaleX = 1.0f;
 			float motionScaleY = 1.0f;
 			FoveatedRenderImpl::Bridge::ComputeMvecScale(eye, motionScaleX, motionScaleY);

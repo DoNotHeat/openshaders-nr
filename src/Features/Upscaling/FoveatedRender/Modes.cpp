@@ -18,6 +18,8 @@
 #include "../FidelityFX.h"
 #include "../Streamline.h"
 
+#include <chrono>
+
 namespace FoveatedRenderImpl
 {
 	using namespace Ops;
@@ -51,6 +53,14 @@ namespace FoveatedRenderImpl
 		ID3D11Resource* upscalingTexture, ID3D11Resource* depthTexture,
 		ID3D11Resource* reactiveMask, ID3D11Resource* transparencyMask, ID3D11Resource* motionVectors)
 	{
+		// Update gaze before any pass reads it (the stretch pass consumes
+		// eyeTrackingData via StretchCB). Doing this here — at the head of the
+		// foveated route — rather than in the later UI-composite hook keeps the
+		// overlay in sync with the same frame it renders (avoiding a one-frame
+		// lag / race with the listeners).
+		auto& foveated = globals::features::upscaling.foveatedRender;
+		foveated.UpdateEyeTrackingFoveation();
+
 		auto p = VRDlssParams::Resolve(upscalingTexture, depthTexture, reactiveMask, transparencyMask, motionVectors);
 
 		// Detect UV/mode change → destroy DLSS resources so SL recreates them at
@@ -185,6 +195,26 @@ namespace FoveatedRenderImpl
 			uint32_t dstX = (i == 1 ? p.eyeWidthOut : 0) + dstCropX;
 			BlendSubrectToOutput(Core::vrSubrectColorOut[i]->resource.get(), p.colorDst, p.colorDstUAV,
 				dstX, dstCropY, subOutW, subOutH);
+
+			// Diagnostic: DLSS subrect write position, correlated by frame
+			// number with [DLSSNR-DIAG]. colorDst dims are read from the
+			// texture itself to verify the write-target extent assumption.
+			// Per-eye statics: a shared timer would starve eye 1.
+			static std::chrono::steady_clock::time_point lastLog[2];
+			auto now = std::chrono::steady_clock::now();
+			if (now - lastLog[i] > std::chrono::seconds(5)) {
+				lastLog[i] = now;
+				uint32_t dstW = 0, dstH = 0;
+				if (winrt::com_ptr<ID3D11Texture2D> dstTex; SUCCEEDED(p.colorDst->QueryInterface(IID_PPV_ARGS(dstTex.put())))) {
+					D3D11_TEXTURE2D_DESC dstDesc{};
+					dstTex->GetDesc(&dstDesc);
+					dstW = dstDesc.Width;
+					dstH = dstDesc.Height;
+				}
+				logger::info("[FOVEATED-DIAG] DLSS writeback frame={} eye={} dstX={} dstCropY={} size={}x{} eyeWidthOut={} eyeHeightOut={} colorDstTex={}x{} renderSBS={}x{}",
+					globals::state ? globals::state->frameCount : 0, i, dstX, dstCropY, subOutW, subOutH,
+					p.eyeWidthOut, p.eyeHeightOut, dstW, dstH, p.renderW, p.renderH);
+			}
 		}
 
 		return true;

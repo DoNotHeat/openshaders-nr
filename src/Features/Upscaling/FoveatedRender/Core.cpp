@@ -12,15 +12,20 @@
 namespace FoveatedRenderImpl::Ops
 {
 	// Mirrors the StretchCB layout in SubrectStretchCS.hlsl — 8 dims + mode +
-	// blur radius + debug flag + pad. Kept at namespace scope so the create-CB
-	// path can size against sizeof(StretchCB) instead of a magic number.
+	// blur radius + debug flag + gaze overlay fields + pad. Kept at namespace
+	// scope so the create-CB path can size against sizeof(StretchCB) instead of
+	// a magic number.
 	struct StretchCB
 	{
-		uint32_t data[8];
-		uint32_t stretchMode;
-		float blurRadius;
-		uint32_t debugVisualize;
-		uint32_t pad;
+		uint32_t data[8];      // 32
+		uint32_t stretchMode;  // 36
+		float blurRadius;      // 40
+		uint32_t debugVisualize;  // 44
+		float gazeX;           // 48  per-eye gaze NDC x
+		float gazeY;           // 52  per-eye gaze NDC y
+		uint32_t gazeDebugMode;  // 56  0=none, 1=crosshair, 2=crosshair+mask
+		uint32_t pad;          // 60
+		uint32_t pad2;         // 64 (16-aligned)
 	};
 
 	eastl::unique_ptr<Texture2D> CreateTextureFromSource(ID3D11Resource* src, uint32_t width, uint32_t height,
@@ -403,6 +408,19 @@ namespace FoveatedRenderImpl::Ops
 			const float r = srcEyeWidth > 0 ? (float)dstWidth / (float)srcEyeWidth : 1.0f;
 			cb.blurRadius = enhSettings.peripheryBlurRadius * (std::max(r, kMinPeripheryBlurRatio) / r);
 			cb.debugVisualize = (enhSettings.debugVisualize != 0 || globals::features::upscaling.foveatedRender.ShouldForceVisualize()) ? 1u : 0u;
+
+			// Gaze debug overlay — reuse the same stretch pass that carries the
+			// red "Visualize regions" tint (proven to reach the final frame), so
+			// the crosshair/mask is drawn through the identical visible path.
+			auto& et = globals::features::upscaling.foveatedRender.eyeTrackingData;
+			const uint32_t etOverlay = enhSettings.eyeTrackingDebugOverlay;
+			if (et.isValid && etOverlay != 0) {
+				cb.gazeDebugMode = etOverlay;
+				// dstOffsetX == 0 → left eye, else right.
+				const float* gaze = (dstOffsetX == 0) ? et.gazeNDCLeft : et.gazeNDCRight;
+				cb.gazeX = gaze[0];
+				cb.gazeY = gaze[1];
+			}
 			std::memcpy(mapped.pData, &cb, sizeof(cb));
 			context->Unmap(Core::vrSubrectStretchCB.get(), 0);
 		}
@@ -643,11 +661,15 @@ namespace FoveatedRenderImpl::Ops
 	uint64_t ComputeSubrectUVHash(const Util::Subrect::UVRegion& leftUV,
 		const Util::Subrect::UVRegion& rightUV, uint32_t mode)
 	{
+		// Hash only the SIZE (w/h) and mode — NOT the position (x/y). The
+		// position changes every frame under gaze-following foveation, and
+		// recreating DLSS resources on every position change would both destroy
+		// the temporal history (pixelated output) and stall (resource churn).
+		// DLSS resources depend only on the subrect size, so a moving subrect
+		// of constant size must NOT trigger recreation.
 		uint64_t h = 0;
 		auto mix = [&](uint64_t v) { h ^= v + 0x9e3779b97f4a7c15ULL + (h << 12) + (h >> 4); };
 		auto mixUV = [&](const Util::Subrect::UVRegion& uv) {
-			mix(std::hash<float>{}(uv.x));
-			mix(std::hash<float>{}(uv.y));
 			mix(std::hash<float>{}(uv.w));
 			mix(std::hash<float>{}(uv.h));
 		};
