@@ -174,6 +174,54 @@ namespace LightingExtensions
 		static void thunk(RE::BSShader* shader, RE::BSRenderPass* pass, uint32_t renderFlags)
 		{
 			globals::state->UpdateLightingShaderPermutation(pass);
+			// Tag skinned character geometry (face, body, hair, armour) per-draw so the
+			// deferred lighting shader can build the Masks.y silhouette mask used by the
+			// DLSSNR character-mask composite. Skinned + actor-owned avoids flag/static
+			// and non-actor animated meshes. Reset for non-characters so the bit never
+			// leaks into the next draw.
+			bool isCharacter = false;
+			if (pass && pass->shaderProperty &&
+				pass->shaderProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kSkinned)) {
+				if (auto* geometry = pass->geometry)
+					if (auto* userData = geometry->GetUserData())
+						// First-person body/hands render in VR every frame and would keep
+						// the skip latch permanently closed — only third-person actors count.
+						isCharacter = userData->As<RE::Actor>() != nullptr &&
+						              userData->formID != 0x14;
+			}
+			// Per-draw range gate: characters beyond the user's range keep vanilla
+			// pixels (no IsCharacter bit -> Masks.y stays 0), so the mask only covers
+			// characters inside the radius. The frame-level latch/distance below then
+			// only reflect in-range characters.
+			float drawDistance = 0.0f;
+			if (isCharacter && globals::features::upscaling.foveatedRender.settings.neuralRenderingSkinMaskOnly) {
+				const float range = globals::features::upscaling.foveatedRender.settings.neuralRenderingCharacterRange;
+				if (auto* geometry = pass ? pass->geometry : nullptr) {
+					if (auto* camera = RE::PlayerCamera::GetSingleton()) {
+						drawDistance = geometry->worldBound.center.GetDistance(camera->cameraRoot->world.translate);
+						if (range > 0.0f && drawDistance > range)
+							isCharacter = false;
+					}
+				}
+			}
+			auto& descriptor = globals::state->permutationData.ExtraShaderDescriptor;
+			if (isCharacter) {
+				descriptor |= static_cast<std::uint32_t>(State::ExtraShaderDescriptors::IsCharacter);
+				// Latch for the DLSSNR skip; cleared each frame in Deferred::StartDeferred
+				// before the geometry pass re-latches it. The nearest-camera distance
+				// feeds the DLSSNR range gating.
+				globals::state->sawCharacterThisFrame = true;
+				if (drawDistance > 0.0f) {
+					globals::state->nearestCharacterDistance = std::min(globals::state->nearestCharacterDistance, drawDistance);
+				} else if (auto* geometry = pass ? pass->geometry : nullptr) {
+					if (auto* camera = RE::PlayerCamera::GetSingleton()) {
+						const float dist = geometry->worldBound.center.GetDistance(camera->cameraRoot->world.translate);
+						globals::state->nearestCharacterDistance = std::min(globals::state->nearestCharacterDistance, dist);
+					}
+				}
+			} else {
+				descriptor &= ~static_cast<std::uint32_t>(State::ExtraShaderDescriptors::IsCharacter);
+			}
 			func(shader, pass, renderFlags);
 		}
 		static inline REL::Relocation<decltype(thunk)> func;

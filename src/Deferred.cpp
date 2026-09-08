@@ -307,6 +307,12 @@ void Deferred::StartDeferred()
 	stateUpdateFlags.set(RE::BSGraphics::ShaderFlags::DIRTY_RENDERTARGET);  // Run OMSetRenderTargets again
 
 	deferredPass = true;
+	// Frame-scoped reset for the DLSSNR character-skip latch: the geometry pass that
+	// follows re-latches it if any character draw happens. frameCount cannot be used
+	// as the frame marker here — UpdateSharedData (which increments it) runs multiple
+	// times per frame.
+	globals::state->sawCharacterThisFrame = false;
+	globals::state->nearestCharacterDistance = FLT_MAX;
 
 	{
 		auto context = globals::d3d::context;

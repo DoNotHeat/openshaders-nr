@@ -99,6 +99,23 @@ struct FoveatedRender
 		uint neuralRenderingStyle = 3;
 		bool neuralRenderingAutoMask = true;
 		bool neuralRenderingUICorrection = false;
+		// Gate the DLSSNR write-back to character pixels via the GBuffer character
+		// mask (Masks.y written by the lighting pass for skinned actor geometry).
+		// Rest of the frame keeps the original pixels, so the neural effect is
+		// limited to characters. Runtime toggle.
+		bool neuralRenderingSkinMaskOnly = false;
+		// When the nearest character is beyond this range (world units, ~feet), the
+		// whole DLSSNR pass is skipped like the no-character case. 0 disables
+		// range gating. Only used with neuralRenderingSkinMaskOnly.
+		float neuralRenderingCharacterRange = 2048.0f;
+		// Neural quality: percentage of the foveal subrect area the DLSSNR pass
+		// evaluates (centered sub-box). Cost scales with the area — 40% quality
+		// costs ~40% of the neural pass. Snapped to 20% steps. VR foveated route
+		// only.
+		uint neuralRenderingQuality = 100;
+		// Dev: render the face-mask weight instead of the composite to verify
+		// coverage. Only read when neuralRenderingSkinMaskOnly is on.
+		bool neuralRenderingSkinMaskDebug = false;
 		// Eye tracking foveation
 		uint eyeTrackingFoveationEnabled = 0;  // Toggle for dynamic gaze-based foveation
 		uint eyeTrackingDebugOverlay = 0;  // 0=off, 1=crosshair, 2=crosshair + vignette mask

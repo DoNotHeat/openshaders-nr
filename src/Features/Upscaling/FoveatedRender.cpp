@@ -40,6 +40,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingStyle,
 	neuralRenderingAutoMask,
 	neuralRenderingUICorrection,
+	neuralRenderingSkinMaskOnly,
+	neuralRenderingCharacterRange,
+	neuralRenderingQuality,
+	neuralRenderingSkinMaskDebug,
 	eyeTrackingFoveationEnabled,
 	eyeTrackingDebugOverlay,
 	eyeTrackingBiasX,
@@ -133,6 +137,23 @@ void FoveatedRender::ClampSettings()
 	settings.subrectFeatherWidth = std::clamp(settings.subrectFeatherWidth, 2.0f, 128.0f);
 	settings.subrectDitherStrength = std::clamp(settings.subrectDitherStrength, 0.0f, 2.0f);
 	settings.neuralRenderingPreset = std::min(settings.neuralRenderingPreset, 4u);
+	settings.neuralRenderingCharacterRange = std::clamp(settings.neuralRenderingCharacterRange, 0.0f, 16384.0f);
+	// Neural quality is a dropdown preset (100/90/75/50/25); snap any stale or
+	// hand-edited value to the nearest valid option.
+	{
+		static constexpr uint kQualityOptions[] = { 100, 90, 75, 50, 25 };
+		uint best = kQualityOptions[0];
+		uint bestDiff = UINT_MAX;
+		for (uint option : kQualityOptions) {
+			const uint diff = option > settings.neuralRenderingQuality ? option - settings.neuralRenderingQuality :
+			                                                           settings.neuralRenderingQuality - option;
+			if (diff < bestDiff) {
+				bestDiff = diff;
+				best = option;
+			}
+		}
+		settings.neuralRenderingQuality = best;
+	}
 	settings.neuralRenderingIntensity = std::clamp(settings.neuralRenderingIntensity, 0.0f, 2.0f);
 	settings.neuralRenderingLocalTone = std::clamp(settings.neuralRenderingLocalTone, 0.0f, 2.0f);
 	settings.neuralRenderingLocalStructure = std::clamp(settings.neuralRenderingLocalStructure, 0.0f, 2.0f);
@@ -627,6 +648,53 @@ void FoveatedRender::DrawSettings()
 			}
 			custom |= ImGui::Checkbox(T(TKEY("neural_rendering_auto_mask"), "Automatic Mask"), &settings.neuralRenderingAutoMask);
 			custom |= ImGui::Checkbox(T(TKEY("neural_rendering_ui_correction"), "UI Correction"), &settings.neuralRenderingUICorrection);
+			custom |= ImGui::Checkbox(T(TKEY("neural_rendering_skin_mask_only"), "Characters Only"),
+				&settings.neuralRenderingSkinMaskOnly);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", T(TKEY("neural_rendering_skin_mask_only_tooltip"),
+					"Limits the neural rendering effect to characters (face, body, hair, armour) using the character "
+					"mask written by the lighting pass. The rest of the frame keeps the original pixels. When no "
+					"character is on screen the whole neural pass is skipped, saving its GPU cost. Characters closer "
+					"than the Range setting additionally enable the effect; beyond it the pass is skipped."));
+			}
+			if (settings.neuralRenderingSkinMaskOnly) {
+				custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_character_range"), "Character Range"),
+					&settings.neuralRenderingCharacterRange, 0.0f, 8192.0f, "%.0f");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("%s", T(TKEY("neural_rendering_character_range_tooltip"),
+						"Distance to the nearest character beyond which the neural pass is skipped entirely. "
+						"0 disables the distance gating (always evaluate when a character is visible)."));
+				}
+			}
+			{
+				// Quality dropdown: discrete render-scale presets. Cost scales with the
+				// evaluated area — 50% quality costs ~25% of the neural pass.
+				static const char* qualityOptions[] = { "100% (Full)", "90%", "75%", "50%", "25%" };
+				static const uint qualityValues[] = { 100, 90, 75, 50, 25 };
+				int qualityIndex = 0;
+				for (int i = 0; i < 5; ++i)
+					if (settings.neuralRenderingQuality == qualityValues[i])
+						qualityIndex = i;
+				if (ImGui::Combo(T(TKEY("neural_rendering_quality"), "Neural Quality"), &qualityIndex, qualityOptions, IM_ARRAYSIZE(qualityOptions))) {
+					settings.neuralRenderingQuality = qualityValues[qualityIndex];
+					custom = true;
+				}
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("%s", T(TKEY("neural_rendering_quality_tooltip"),
+						"Internal resolution of the neural pass as a percentage of the foveal region: the network "
+						"evaluates the whole region at reduced scale and the result is stretched back. Lower = fewer "
+						"pixels for the network = higher FPS at reduced neural detail. VR foveated route only."));
+				}
+			}
+			if (settings.neuralRenderingSkinMaskOnly) {
+				custom |= ImGui::Checkbox(T(TKEY("neural_rendering_skin_mask_debug"), "Debug: Visualize Character Mask"),
+					&settings.neuralRenderingSkinMaskDebug);
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("%s", T(TKEY("neural_rendering_skin_mask_debug_tooltip"),
+						"Renders the character mask instead of the composite: green = character pixels receiving the "
+						"neural effect, black = untouched pixels. Use this to verify mask coverage before judging the blend."));
+				}
+			}
 			if (custom)
 				settings.neuralRenderingPreset = 0;
 

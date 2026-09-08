@@ -319,7 +319,11 @@ public:
 		SuppressExternalEmittance = 1 << 5,
 		AdditiveLighting = 1 << 6,
 		// --- Open Shaders fork-only flags below: reserved high end, not upstream's sequence. ---
-		IsEye = 1u << 31
+		IsEye = 1u << 31,
+		// True for skinned character geometry (faces, body, hair, armour). Written per-draw
+		// by the DLSSNR character hook; read in Lighting.hlsl to build the Masks.y silhouette
+		// mask used by the DLSSNR skin-mask composite.
+		IsCharacter = 1u << 30
 	};
 
 	/** @brief Bitflags describing extra feature-specific properties related to terrain displacement and material models. */
@@ -450,6 +454,18 @@ public:
 
 	PermutationCB permutationData{};
 	PermutationCB permutationDataPrevious{};
+
+	// Set by the character tag hook (BSLightingShader_SetupGeometry) whenever a
+	// skinned actor draw is recorded this frame; the DLSSNR integration reads it
+	// to skip the whole neural evaluate + composite when no character is on
+	// screen. Cleared each frame in Deferred::StartDeferred before the geometry
+	// pass re-latches it.
+	bool sawCharacterThisFrame = false;
+	// Smallest camera-to-actor distance seen among this frame's character draws
+	// (world units, ~feet). Used by the DLSSNR integration's range gating: when
+	// the nearest character is beyond the user's range slider, the whole neural
+	// pass is skipped exactly like the no-character case.
+	float nearestCharacterDistance = FLT_MAX;
 
 	Util::FrameChecker frameChecker;
 	uint frameCount = 0;

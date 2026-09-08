@@ -32,7 +32,8 @@ SamplerState PointSampler : register(s0);
 	float sssAmount = MaskTexture[DTid.xy].x;
 
 	if (sssAmount > 0.0) {
-		bool humanProfile = MaskTexture[DTid.xy].y > 0.0;
+		// Masks.y: 1.0 = human face, 0.5 = beast face, 0.0 = other (see Lighting.hlsl Masks write)
+		bool humanProfile = MaskTexture[DTid.xy].y > 0.75;
 
 		float4 color = BurleyNormalizedSS(DTid.xy, texCoord, eyeIndex, sssAmount, humanProfile, SSSRW[DTid.xy]);
 		SSSRW[DTid.xy] = max(0, color);
@@ -41,7 +42,8 @@ SamplerState PointSampler : register(s0);
 #elif defined(HORIZONTAL)
 
 	float sssAmount = MaskTexture[DTid.xy].x;
-	bool humanProfile = MaskTexture[DTid.xy].y > 0.0;
+	// Masks.y: 1.0 = human face, 0.5 = beast face, 0.0 = other (see Lighting.hlsl Masks write)
+	bool humanProfile = MaskTexture[DTid.xy].y > 0.75;
 
 	float4 color = SSSSBlurCS(texCoord, float2(1.0, 0.0), sssAmount, humanProfile);
 	SSSRW[DTid.xy] = max(0, color);
@@ -51,7 +53,8 @@ SamplerState PointSampler : register(s0);
 	float sssAmount = MaskTexture[DTid.xy].x;
 
 	if (sssAmount > 0.0) {
-		bool humanProfile = MaskTexture[DTid.xy].y > 0.0;
+		// Masks.y: 1.0 = human face, 0.5 = beast face, 0.0 = other (see Lighting.hlsl Masks write)
+		bool humanProfile = MaskTexture[DTid.xy].y > 0.75;
 
 		float4 originalColor = SSSRW[DTid.xy];
 		float4 color = SSSSBlurCS(texCoord, float2(0.0, 1.0), sssAmount, humanProfile);
