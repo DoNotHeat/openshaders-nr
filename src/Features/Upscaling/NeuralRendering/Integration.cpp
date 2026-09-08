@@ -178,13 +178,13 @@ namespace NeuralRendering
 		// Gaze-following foveation moves the subrect between frames, and NR's
 		// temporal history lags the moved window — evaluating at full strength
 		// mid-move reads as breathing shadows / jittering surroundings. NR
-		// stays ON every frame (on/off switching flickers far worse); instead
-		// its Intensity eases toward zero while the subrect moves and eases
-		// back once it settles, so the effect fades out during motion and
-		// fades back in over the settled region.
+		// stays ON every frame (on/off switching flickers far worse); its
+		// Intensity eases toward zero while the subrect glides and recovers
+		// immediately as the steps shrink, so the effect is back at full
+		// strength roughly when the region reaches the new fixation point.
 		static float nrIntensityScale = 1.0f;
-		constexpr float kMoveFadePerFrame = 0.25f;   // toward 0 while moving
-		constexpr float kSettleFadePerFrame = 0.08f; // back toward 1 when still
+		constexpr float kMoveFadePerFrame = 0.4f;    // toward 0 while moving
+		constexpr float kSettleFadePerFrame = 0.2f;  // back toward 1 when still
 		const float targetScale = foveated.subrectMovedThisFrame ? 0.0f : 1.0f;
 		const float fadeRate = (targetScale < nrIntensityScale) ? kMoveFadePerFrame : kSettleFadePerFrame;
 		nrIntensityScale += (targetScale - nrIntensityScale) * fadeRate;

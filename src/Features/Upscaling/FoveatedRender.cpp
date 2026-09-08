@@ -318,6 +318,14 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	//    (convergence jumps, tracker glitches) never move the region.
 	const float deadzonePx = settings.eyeTrackingFovDeadzonePx;
 	constexpr uint kGazeDwellFrames = 8;
+	// Saccade bypass: fixation drift moves slower than ~15 px/frame, a real
+	// gaze shift covers hundreds. A drift this fast is deliberate — start the
+	// glide immediately instead of waiting out the dwell gate, which delays
+	// the region until after the eye has already focused on the new target.
+	constexpr float kSaccadeSpeedPx = 40.0f;
+	// Persists across frames: saccade speed is the per-frame growth of the
+	// drift distance, so it needs last frame's drift per eye.
+	static float prevDriftPx[2] = { 0.0f, 0.0f };
 	auto gazeMovedPx = [&](const float* off, const float* last) {
 		const float dxPx = (off[0] - last[0]) * eyeWidthPx;
 		const float dyPx = (off[1] - last[1]) * eyeHeightPx;
@@ -329,16 +337,24 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	const bool rightOver = rightDriftPx >= deadzonePx;
 	gazeOverThresholdFrames[0] = leftOver ? gazeOverThresholdFrames[0] + 1 : 0;
 	gazeOverThresholdFrames[1] = rightOver ? gazeOverThresholdFrames[1] + 1 : 0;
-	const bool leftMoved = gazeOverThresholdFrames[0] >= kGazeDwellFrames;
-	const bool rightMoved = gazeOverThresholdFrames[1] >= kGazeDwellFrames;
-	subrectMovedThisFrame = leftMoved || rightMoved;
+	const bool leftSaccade = leftOver && leftDriftPx - prevDriftPx[0] >= kSaccadeSpeedPx;
+	const bool rightSaccade = rightOver && rightDriftPx - prevDriftPx[1] >= kSaccadeSpeedPx;
+	prevDriftPx[0] = leftDriftPx;
+	prevDriftPx[1] = rightDriftPx;
+	const bool leftMoved = gazeOverThresholdFrames[0] >= kGazeDwellFrames || leftSaccade;
+	const bool rightMoved = gazeOverThresholdFrames[1] >= kGazeDwellFrames || rightSaccade;
+	// Binocular lock: the two zones must glide in the same frames. The eyes'
+	// gates trip a frame or two apart under convergence/tracker noise, and
+	// staggered zone moves read as binocular flicker. Either eye tripping
+	// starts BOTH glides this frame — each toward its own gaze target.
+	const bool anyMoved = leftMoved || rightMoved;
+	subrectMovedThisFrame = anyMoved;
 	if (subrectMovedThisFrame) {
-		// Glide toward the target instead of jumping: apply a fraction of the
-		// remaining distance per frame. A jump re-positions the crop window over
-		// different world content in one step, forcing a full DLSS history reset
-		// (visible as a lurch); gliding spreads the same repositioning over a
-		// few frames so each step is small enough that DLSS's per-frame reset
-		// barely reads as softness rather than a visible rebuild.
+		// Glide toward the target: apply a fraction of the remaining distance
+		// per frame. The factor is tuned so the region arrives within a few
+		// frames of the saccade — pinhole reprojection lets DLSS follow fast
+		// crops, and a slow glide made the region land after the eye already
+		// focused (visible rebuild on NPCs at the new fixation point).
 		const float glide = settings.eyeTrackingFovGlideFactor;
 		auto glideToward = [&](float* last, const float* target) {
 			last[0] += (target[0] - last[0]) * glide;
@@ -346,9 +362,9 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 		};
 		const float prevL[2] = { lastGazeOffsetUV[0], lastGazeOffsetUV[1] };
 		const float prevR[2] = { lastGazeOffsetRightUV[0], lastGazeOffsetRightUV[1] };
-		if (leftMoved)
+		if (anyMoved)
 			glideToward(lastGazeOffsetUV, offsetL);
-		if (rightMoved)
+		if (anyMoved)
 			glideToward(lastGazeOffsetRightUV, offsetR);
 		subrectController.SetGazeOffset(lastGazeOffsetUV[0], -lastGazeOffsetUV[1],
 			lastGazeOffsetRightUV[0], -lastGazeOffsetRightUV[1]);
@@ -747,11 +763,12 @@ void FoveatedRender::DrawSettings()
 			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_fov_deadzone"), "FOV Deadzone"),
 				&settings.eyeTrackingFovDeadzonePx, 50.0f, 800.0f, "%.0f px");
 			if (auto _tt = Util::HoverTooltipWrapper()) {
-				ImGui::Text("%s", "Fraction of the remaining distance the region covers\n"
-					"per frame once the threshold trips. 1.0 snaps instantly\n"
-					"(visible lurch); lower values glide smoothly.");
+				ImGui::Text("%s", "Glide speed: the region covers its remaining\n"
+					"distance over ~1/factor frames once a move starts.\n"
+					"Lower = faster arrival (pinhole reprojection keeps DLSS\n"
+					"history stable); higher values glide more slowly.");
 			}
-			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_fov_glide"), "FOV Glide Factor"),
+			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_fov_glide"), "FOV Glide Speed"),
 				&settings.eyeTrackingFovGlideFactor, 0.05f, 1.0f, "%.2f");
 
 			const char* overlayModes[] = { "Off", "Crosshair", "Crosshair + Mask" };

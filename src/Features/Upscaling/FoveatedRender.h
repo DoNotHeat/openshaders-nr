@@ -113,10 +113,11 @@ struct FoveatedRender
 		// well above natural wander or the region — and the DLSS/NR temporal
 		// accumulation — churns constantly.
 		float eyeTrackingFovDeadzonePx = 300.0f;  // [50, 800]
-		// Fraction of the remaining gaze offset applied per frame once the
-		// threshold trips. 1.0 = jump instantly (max DLSS history churn);
-		// lower values glide the region, spreading the churn over frames.
-		float eyeTrackingFovGlideFactor = 0.05f;  // (0, 1]
+		// Glide speed dial: the region covers its remaining distance over
+		// 1/factor frames once a move starts (0.2 = 5 frames, 1.0 = snap).
+		// Pinhole reprojection lets DLSS follow fast crops, so the glide can
+		// be short; long glides made the region arrive after the eye focused.
+		float eyeTrackingFovGlideFactor = 0.2f;  // (0, 1]
 	};
 
 	inline static constexpr Util::Settings::RestartTable<Settings, 1> kRestartFields{ {
@@ -145,9 +146,8 @@ struct FoveatedRender
 
 	// Consecutive frames each eye's gaze has exceeded the move threshold.
 	// The subrect only starts moving after kGazeDwellFrames consecutive
-	// over-threshold frames — tracker/convergence drift spikes last a few
-	// frames and must not reposition the region (each move restarts DLSS/NR
-	// temporal accumulation).
+	// over-threshold frames — or immediately on a saccade-speed drift, when
+	// the dwell gate would delay the region behind an already-focused eye.
 	uint gazeOverThresholdFrames[2] = { 0, 0 };
 
 	/**
