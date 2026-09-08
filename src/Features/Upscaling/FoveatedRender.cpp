@@ -347,7 +347,14 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	// gates trip a frame or two apart under convergence/tracker noise, and
 	// staggered zone moves read as binocular flicker. Either eye tripping
 	// starts BOTH glides this frame — each toward its own gaze target.
-	const bool anyMoved = leftMoved || rightMoved;
+	// Glide latch: the EMA gaze target keeps drifting for several frames
+	// after a saccade, so the drift can fall back under the 2x re-arm
+	// deadzone mid-move and the glide stops — then re-triggers on the next
+	// dwell, redrawing the region twice. Latch the glide ON at trip time and
+	// keep moving both zones until they reach their targets.
+	if (leftMoved || rightMoved)
+		gazeGlideActive = true;
+	const bool anyMoved = gazeGlideActive;
 	subrectMovedThisFrame = anyMoved;
 	if (subrectMovedThisFrame) {
 		// Glide toward the target: apply a fraction of the remaining distance
@@ -374,6 +381,15 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 		const float stepPx = std::max(
 			gazeMovedPx(lastGazeOffsetUV, prevL), gazeMovedPx(lastGazeOffsetRightUV, prevR));
 		subrectMovedThisFrame = stepPx > 2.0f;
+		// End the glide once both zones have essentially arrived. The re-arm
+		// deadzone below must NOT gate this: the EMA target drifts for frames
+		// after the saccade, so dropping the latch as soon as the drift dips
+		// inside 2x deadzone stops the glide short and forces a second redraw
+		// when the dwell re-triggers on the resumed drift.
+		const float remainingPx = std::max(
+			gazeMovedPx(offsetL, lastGazeOffsetUV), gazeMovedPx(offsetR, lastGazeOffsetRightUV));
+		if (remainingPx < 16.0f)
+			gazeGlideActive = false;
 		// Re-arm the dwell counters against the NEW position with a 2x
 		// deadzone: the region must not re-trigger until the gaze has drifted
 		// well past the just-applied offset.

@@ -150,6 +150,12 @@ struct FoveatedRender
 	// the dwell gate would delay the region behind an already-focused eye.
 	uint gazeOverThresholdFrames[2] = { 0, 0 };
 
+	// True while a gaze-triggered glide is running to completion. The EMA
+	// gaze target keeps drifting for several frames after a saccade, so a
+	// glide that stops on the deadzone re-arm and re-triggers later reads as
+	// two separate region redraws — the latch keeps it moving until arrival.
+	bool gazeGlideActive = false;
+
 	/**
 	 * @brief Current gaze-following subrect offset for one eye, in NDC units.
 	 *
