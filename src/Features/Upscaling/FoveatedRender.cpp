@@ -362,11 +362,7 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	// gaze shift covers hundreds. A drift this fast is deliberate — start the
 	// glide immediately instead of waiting out the dwell gate, which delays
 	// the region until after the eye has already focused on the new target.
-	// Threshold is high AND must hold 2 frames: tracker jitter bursts reach
-	// 40-80 px/frame on a single frame, and every false trip teleports the
-	// subrect, breaking the NGX NR temporal history (per-character flicker).
-	constexpr float kSaccadeSpeedPx = 150.0f;
-	constexpr uint kSaccadeConfirmFrames = 2;
+	constexpr float kSaccadeSpeedPx = 40.0f;
 	// Persists across frames: saccade speed is the per-frame growth of the
 	// drift distance, so it needs last frame's drift per eye.
 	static float prevDriftPx[2] = { 0.0f, 0.0f };
@@ -381,14 +377,8 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	const bool rightOver = rightDriftPx >= deadzonePx;
 	gazeOverThresholdFrames[0] = leftOver ? gazeOverThresholdFrames[0] + 1 : 0;
 	gazeOverThresholdFrames[1] = rightOver ? gazeOverThresholdFrames[1] + 1 : 0;
-	// Saccade confirmation counters: per-eye consecutive fast-growth frames.
-	// The bypass fires only after 2 consecutive over-speed frames — a single
-	// jitter spike is filtered out, a real saccade trips on the next frame.
-	static uint saccadeConfirmFrames[2] = { 0, 0 };
-	saccadeConfirmFrames[0] = (leftOver && leftDriftPx - prevDriftPx[0] >= kSaccadeSpeedPx) ? saccadeConfirmFrames[0] + 1 : 0;
-	saccadeConfirmFrames[1] = (rightOver && rightDriftPx - prevDriftPx[1] >= kSaccadeSpeedPx) ? saccadeConfirmFrames[1] + 1 : 0;
-	const bool leftSaccade = saccadeConfirmFrames[0] >= kSaccadeConfirmFrames;
-	const bool rightSaccade = saccadeConfirmFrames[1] >= kSaccadeConfirmFrames;
+	const bool leftSaccade = leftOver && leftDriftPx - prevDriftPx[0] >= kSaccadeSpeedPx;
+	const bool rightSaccade = rightOver && rightDriftPx - prevDriftPx[1] >= kSaccadeSpeedPx;
 	prevDriftPx[0] = leftDriftPx;
 	prevDriftPx[1] = rightDriftPx;
 	const bool leftMoved = gazeOverThresholdFrames[0] >= kGazeDwellFrames || leftSaccade;
