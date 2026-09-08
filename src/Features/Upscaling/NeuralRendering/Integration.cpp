@@ -593,9 +593,17 @@ namespace NeuralRendering
 				inputs[eye].motionVectors = preScaleMvec[eye]->resource.get();
 			}
 		}
+		// Subrect jumps invalidate the network's temporal history: unlike DLSS
+		// (which receives pinhole-compensated matrices via Streamline), Feature 18
+		// gets only color/guide crops and has no notion of the crop shifting. Its
+		// accumulation then tracks phantom motion and the masked area degrades
+		// into a smeared blob. Reset the history in jump frames so accumulation
+		// restarts at the new position; with the skin-mask composite active the
+		// couple of reset frames are largely hidden by the original pixels.
+		const bool subrectJumped = foveated.subrectMovedThisFrame;
 		const bool succeeded = Renderer::Instance().ApplyStereo(globals::d3d::device, context,
 			total.texture, inputs, FoveatedRenderImpl::Core::vrSubrectInW, FoveatedRenderImpl::Core::vrSubrectInH,
-			outWidth, outHeight, GetTuning(foveated.settings, nrIntensityScale));
+			outWidth, outHeight, GetTuning(foveated.settings, nrIntensityScale), subrectJumped);
 		if (succeeded) {
 			lastAppliedFrame = frame;
 			if (!writebackLogged) {
