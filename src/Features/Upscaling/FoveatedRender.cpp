@@ -44,7 +44,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	eyeTrackingDebugOverlay,
 	eyeTrackingBiasX,
 	eyeTrackingBiasY,
-	eyeTrackingFovMoveThresholdPx,
+	eyeTrackingFovDeadzonePx,
 	eyeTrackingFovGlideFactor);
 
 // ============================================================================
@@ -142,7 +142,7 @@ void FoveatedRender::ClampSettings()
 	settings.eyeTrackingDebugOverlay = std::min(settings.eyeTrackingDebugOverlay, 2u);
 	settings.eyeTrackingBiasX = std::clamp(settings.eyeTrackingBiasX, -0.5f, 0.5f);
 	settings.eyeTrackingBiasY = std::clamp(settings.eyeTrackingBiasY, -0.5f, 0.5f);
-	settings.eyeTrackingFovMoveThresholdPx = std::clamp(settings.eyeTrackingFovMoveThresholdPx, 0.0f, 120.0f);
+	settings.eyeTrackingFovDeadzonePx = std::clamp(settings.eyeTrackingFovDeadzonePx, 50.0f, 800.0f);
 	settings.eyeTrackingFovGlideFactor = std::clamp(settings.eyeTrackingFovGlideFactor, 0.05f, 1.0f);
 	// Preset clamping reads from Upscaling::Settings now.
 	auto& sharedPreset = globals::features::upscaling.settings.presetDLSS;
@@ -304,14 +304,33 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	// subrect moves only on deliberate gaze shifts. Evaluated per eye: under
 	// convergence the eyes' offsets move independently, and either eye's move
 	// must update its square.
-	const float moveThresholdPx = settings.eyeTrackingFovMoveThresholdPx;
+	//
+	// The raw threshold alone cannot hold the region still: human gaze is
+	// never stationary (fixation drift, microsaccades) and the tracker adds
+	// its own wander, so the drift crosses any small threshold every few
+	// seconds. Two stability layers fix that:
+	// 1. Deadzone: the region re-centers only when the gaze has drifted the
+	//    configured deadzone AWAY FROM THE ANCHORED POINT. Natural fixation
+	//    wander stays well inside it, so the region — and the DLSS/NR
+	//    temporal accumulation — holds still through normal looking.
+	// 2. Dwell: the drift must exceed the deadzone for kGazeDwellFrames
+	//    consecutive frames before the glide starts, so transient spikes
+	//    (convergence jumps, tracker glitches) never move the region.
+	const float deadzonePx = settings.eyeTrackingFovDeadzonePx;
+	constexpr uint kGazeDwellFrames = 8;
 	auto gazeMovedPx = [&](const float* off, const float* last) {
 		const float dxPx = (off[0] - last[0]) * eyeWidthPx;
 		const float dyPx = (off[1] - last[1]) * eyeHeightPx;
 		return std::sqrt(dxPx * dxPx + dyPx * dyPx);
 	};
-	const bool leftMoved = gazeMovedPx(offsetL, lastGazeOffsetUV) >= moveThresholdPx;
-	const bool rightMoved = gazeMovedPx(offsetR, lastGazeOffsetRightUV) >= moveThresholdPx;
+	const float leftDriftPx = gazeMovedPx(offsetL, lastGazeOffsetUV);
+	const float rightDriftPx = gazeMovedPx(offsetR, lastGazeOffsetRightUV);
+	const bool leftOver = leftDriftPx >= deadzonePx;
+	const bool rightOver = rightDriftPx >= deadzonePx;
+	gazeOverThresholdFrames[0] = leftOver ? gazeOverThresholdFrames[0] + 1 : 0;
+	gazeOverThresholdFrames[1] = rightOver ? gazeOverThresholdFrames[1] + 1 : 0;
+	const bool leftMoved = gazeOverThresholdFrames[0] >= kGazeDwellFrames;
+	const bool rightMoved = gazeOverThresholdFrames[1] >= kGazeDwellFrames;
 	subrectMovedThisFrame = leftMoved || rightMoved;
 	if (subrectMovedThisFrame) {
 		// Glide toward the target instead of jumping: apply a fraction of the
@@ -325,12 +344,25 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 			last[0] += (target[0] - last[0]) * glide;
 			last[1] += (target[1] - last[1]) * glide;
 		};
+		const float prevL[2] = { lastGazeOffsetUV[0], lastGazeOffsetUV[1] };
+		const float prevR[2] = { lastGazeOffsetRightUV[0], lastGazeOffsetRightUV[1] };
 		if (leftMoved)
 			glideToward(lastGazeOffsetUV, offsetL);
 		if (rightMoved)
 			glideToward(lastGazeOffsetRightUV, offsetR);
 		subrectController.SetGazeOffset(lastGazeOffsetUV[0], -lastGazeOffsetUV[1],
 			lastGazeOffsetRightUV[0], -lastGazeOffsetRightUV[1]);
+		// Report the move only while the glide step is meaningful: NR pauses on
+		// this flag, and holding the pause through the glide's tail (sub-pixel
+		// steps) would keep NR off for most of a second per recenter.
+		const float stepPx = std::max(
+			gazeMovedPx(lastGazeOffsetUV, prevL), gazeMovedPx(lastGazeOffsetRightUV, prevR));
+		subrectMovedThisFrame = stepPx > 2.0f;
+		// Re-arm the dwell counters against the NEW position with a 2x
+		// deadzone: the region must not re-trigger until the gaze has drifted
+		// well past the just-applied offset.
+		gazeOverThresholdFrames[0] = (leftDriftPx >= 2.0f * deadzonePx) ? kGazeDwellFrames : 0;
+		gazeOverThresholdFrames[1] = (rightDriftPx >= 2.0f * deadzonePx) ? kGazeDwellFrames : 0;
 	}
 
 	eyeTrackingData.isValid = true;
@@ -707,12 +739,13 @@ void FoveatedRender::DrawSettings()
 			// FOV region movement: how far the gaze must drift before the
 			// high-quality region repositions, and how fast it glides there.
 			if (auto _tt = Util::HoverTooltipWrapper()) {
-				ImGui::Text("%s", "Gaze drift (pixels) required before the FOV region moves.\n"
-					"Higher = natural pupil drift never re-renders the region\n"
-					"(DLSS history stays stable); lower = more responsive.");
+				ImGui::Text("%s", "Deadzone around the anchored region center (pixels).\n"
+					"The region re-centers only when the gaze drifts this far from it.\n"
+					"Human gaze is never stationary, so keep this well above natural\n"
+					"wander or the region churns constantly.");
 			}
-			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_fov_threshold"), "FOV Move Threshold"),
-				&settings.eyeTrackingFovMoveThresholdPx, 0.0f, 120.0f, "%.0f px");
+			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_fov_deadzone"), "FOV Deadzone"),
+				&settings.eyeTrackingFovDeadzonePx, 50.0f, 800.0f, "%.0f px");
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				ImGui::Text("%s", "Fraction of the remaining distance the region covers\n"
 					"per frame once the threshold trips. 1.0 snaps instantly\n"

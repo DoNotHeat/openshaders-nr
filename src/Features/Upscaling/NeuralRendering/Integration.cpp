@@ -68,10 +68,10 @@ namespace NeuralRendering
 			return true;
 		}
 
-		Tuning GetTuning(const FoveatedRender::Settings& settings)
+		Tuning GetTuning(const FoveatedRender::Settings& settings, float intensityScale)
 		{
 			return {
-				settings.neuralRenderingIntensity,
+				settings.neuralRenderingIntensity * intensityScale,
 				settings.neuralRenderingLocalTone,
 				settings.neuralRenderingLocalStructure,
 				settings.neuralRenderingSkinStructure,
@@ -139,7 +139,7 @@ namespace NeuralRendering
 				color[0]->resource.get(), depth.texture, depth.depthSRV,
 				upscaling.motionVectorCopyTexture->resource.get(), motionDesc.Width, motionDesc.Height,
 				totalDesc.Width, totalDesc.Height, static_cast<float>(motionDesc.Width),
-				static_cast<float>(motionDesc.Height), GetTuning(foveated.settings));
+				static_cast<float>(motionDesc.Height), GetTuning(foveated.settings, 1.0f));
 			if (succeeded) {
 				context->CopyResource(framebuffer, color[0]->resource.get());
 				lastAppliedFrame = frame;
@@ -175,21 +175,23 @@ namespace NeuralRendering
 		if (lastAppliedFrame == frame || (guideFrame != frame && !(frame > 0 && guideFrame == frame - 1)))
 			return false;
 
-		// Gaze-following foveation moves the subrect between frames. The
-		// depth/mvec guides were cropped at the PREVIOUS subrect position, so
-		// evaluating against a color crop at the NEW position misaligns the
-		// guides and writes a shifted duplicate region (a second visible
-		// "square" offset from the DLSS one). Skip any frame whose guides are
-		// one frame stale while the subrect moved this frame; the next frame
-		// re-crops guides at the new position and evaluation resumes aligned.
-		if (guideFrame != frame && foveated.subrectMovedThisFrame) {
-			static std::uint32_t lastSkipLogFrame = 0;
-			if (frame - lastSkipLogFrame > 300) {
-				lastSkipLogFrame = frame;
-				logger::info("[DLSSNR-DIAG] skipped NR eval frame={} guides={} (stale + subrect moved)", frame, guideFrame);
-			}
-			return false;
-		}
+		// Gaze-following foveation moves the subrect between frames, and NR's
+		// temporal history lags the moved window — evaluating at full strength
+		// mid-move reads as breathing shadows / jittering surroundings. NR
+		// stays ON every frame (on/off switching flickers far worse); instead
+		// its Intensity eases toward zero while the subrect moves and eases
+		// back once it settles, so the effect fades out during motion and
+		// fades back in over the settled region.
+		static float nrIntensityScale = 1.0f;
+		constexpr float kMoveFadePerFrame = 0.25f;   // toward 0 while moving
+		constexpr float kSettleFadePerFrame = 0.08f; // back toward 1 when still
+		const float targetScale = foveated.subrectMovedThisFrame ? 0.0f : 1.0f;
+		const float fadeRate = (targetScale < nrIntensityScale) ? kMoveFadePerFrame : kSettleFadePerFrame;
+		nrIntensityScale += (targetScale - nrIntensityScale) * fadeRate;
+		if (nrIntensityScale < 0.01f)
+			nrIntensityScale = 0.0f;
+		if (nrIntensityScale > 0.99f)
+			nrIntensityScale = 1.0f;
 
 		auto* renderer = globals::game::renderer;
 		auto* context = globals::d3d::context;
@@ -207,6 +209,35 @@ namespace NeuralRendering
 		const auto& rightUV = foveated.subrectController.GetRightEyeUV();
 		if (leftUV.w != rightUV.w || leftUV.h != rightUV.h)
 			return false;
+
+		// Gaze-following foveation moves the subrect between frames, so the
+		// depth/mvec guides cached by the DLSS route may be one frame stale —
+		// cropped at the PREVIOUS subrect position while the color crop below
+		// reads the CURRENT one. Re-crop the guides at the current position
+		// right here instead of skipping the evaluation: a skip reads as a
+		// visible NR flicker (stale output held for a frame) on every glide
+		// step, while a re-crop keeps color and guides aligned every frame.
+		// Guides live in the full SBS depth/mvec textures, so the crop boxes
+		// mirror the DLSS route's per-eye boxes exactly.
+		if (guideFrame != frame) {
+			const std::uint32_t eyeWidthIn = totalDesc.Width / 2;
+			const std::uint32_t eyeHeightIn = totalDesc.Height;
+			const Util::Subrect::UVRegion* guideUVs[2]{ &leftUV, &rightUV };
+			for (std::uint32_t eye = 0; eye < 2; ++eye) {
+				const auto& uv = *guideUVs[eye];
+				const std::uint32_t subInW = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(eyeWidthIn * uv.w));
+				const std::uint32_t subInH = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(eyeHeightIn * uv.h));
+				const std::uint32_t cropX = static_cast<std::uint32_t>(uv.x * eyeWidthIn);
+				const std::uint32_t cropY = static_cast<std::uint32_t>(uv.y * eyeHeightIn);
+				const std::uint32_t sbsX = (eye ? eyeWidthIn : 0) + cropX;
+				const D3D11_BOX sbsCrop{ sbsX, cropY, 0, sbsX + subInW, cropY + subInH, 1 };
+				context->CopySubresourceRegion(FoveatedRenderImpl::Core::vrSubrectDepth[eye]->resource.get(), 0, 0, 0, 0,
+					renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture, 0, &sbsCrop);
+				context->CopySubresourceRegion(FoveatedRenderImpl::Core::vrSubrectMotionVectors[eye]->resource.get(), 0, 0, 0, 0,
+					upscaling.motionVectorCopyTexture ? upscaling.motionVectorCopyTexture->resource.get() : nullptr, 0, &sbsCrop);
+			}
+			FoveatedRenderImpl::Core::neuralGuidesFrame = frame;
+		}
 		const std::uint32_t eyeWidth = totalDesc.Width / 2;
 		const std::uint32_t outWidth = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(eyeWidth * leftUV.w));
 		const std::uint32_t outHeight = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(totalDesc.Height * leftUV.h));
@@ -251,7 +282,7 @@ namespace NeuralRendering
 		}
 		const bool succeeded = Renderer::Instance().ApplyStereo(globals::d3d::device, context,
 			total.texture, inputs, FoveatedRenderImpl::Core::vrSubrectInW, FoveatedRenderImpl::Core::vrSubrectInH,
-			outWidth, outHeight, GetTuning(foveated.settings));
+			outWidth, outHeight, GetTuning(foveated.settings, nrIntensityScale));
 		if (succeeded) {
 			lastAppliedFrame = frame;
 			if (!writebackLogged) {

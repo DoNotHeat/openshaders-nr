@@ -41,7 +41,8 @@ namespace NeuralRendering
 		bool ApplyStereo(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Resource* color,
 			const std::array<StereoEyeInput, 2>& eyes,
 			std::uint32_t guideWidth, std::uint32_t guideHeight,
-			std::uint32_t colorWidth, std::uint32_t colorHeight, const Tuning& tuning);
+			std::uint32_t colorWidth, std::uint32_t colorHeight, const Tuning& tuning,
+			bool forceReset = false);
 		void Reset();
 		void ResetHistory();
 

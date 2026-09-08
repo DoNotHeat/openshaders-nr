@@ -107,10 +107,12 @@ struct FoveatedRender
 		// the user looks straight ahead.
 		float eyeTrackingBiasX = 0.0f;   // [-0.5, 0.5]
 		float eyeTrackingBiasY = 0.0f;   // [-0.5, 0.5]
-		// Gaze drift (pixels) required before the FOV subrect moves. Every move
-		// resets DLSS temporal history, so a high threshold keeps the region
-		// stable through natural pupil drift; low = more responsive, more churn.
-		float eyeTrackingFovMoveThresholdPx = 60.0f;  // [0, 120]
+		// Deadzone around the anchored region center (pixels): the region
+		// re-centers only when the gaze drifts this far from it. Human gaze is
+		// never stationary (fixation drift, microsaccades), so this must sit
+		// well above natural wander or the region — and the DLSS/NR temporal
+		// accumulation — churns constantly.
+		float eyeTrackingFovDeadzonePx = 300.0f;  // [50, 800]
 		// Fraction of the remaining gaze offset applied per frame once the
 		// threshold trips. 1.0 = jump instantly (max DLSS history churn);
 		// lower values glide the region, spreading the churn over frames.
@@ -140,6 +142,13 @@ struct FoveatedRender
 	// under convergence.
 	float lastGazeOffsetUV[2] = { 0.0f, 0.0f };
 	float lastGazeOffsetRightUV[2] = { 0.0f, 0.0f };
+
+	// Consecutive frames each eye's gaze has exceeded the move threshold.
+	// The subrect only starts moving after kGazeDwellFrames consecutive
+	// over-threshold frames — tracker/convergence drift spikes last a few
+	// frames and must not reposition the region (each move restarts DLSS/NR
+	// temporal accumulation).
+	uint gazeOverThresholdFrames[2] = { 0, 0 };
 
 	/**
 	 * @brief Current gaze-following subrect offset for one eye, in NDC units.

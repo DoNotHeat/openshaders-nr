@@ -121,7 +121,8 @@ namespace NeuralRendering
 		bool ApplyStereo(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Resource* color,
 			const std::array<StereoEyeInput, 2>& inputs,
 			std::uint32_t guideWidth, std::uint32_t guideHeight,
-			std::uint32_t colorWidth, std::uint32_t colorHeight, const Tuning& tuning)
+			std::uint32_t colorWidth, std::uint32_t colorHeight, const Tuning& tuning,
+			bool forceReset)
 		{
 			if (failureLatched || !device || !context || !color)
 				return false;
@@ -179,7 +180,8 @@ namespace NeuralRendering
 				const bool eyeSucceeded = Runtime::Instance().Execute(commandList, eyeIndex,
 					eye.color.resource12.Get(), eye.depth.resource12.Get(), eye.motionVectors.resource12.Get(),
 					eye.output.resource12.Get(), guideWidth, guideHeight, colorWidth, colorHeight,
-					input.motionVectorScaleX, input.motionVectorScaleY, tuning, resetPending[eyeIndex]);
+					input.motionVectorScaleX, input.motionVectorScaleY, tuning,
+					resetPending[eyeIndex] || forceReset);
 				for (auto& barrier : barriers)
 					std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
 				commandList->ResourceBarrier(static_cast<UINT>(std::size(barriers)), barriers);
@@ -332,10 +334,11 @@ namespace NeuralRendering
 	bool Renderer::ApplyStereo(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Resource* color,
 		const std::array<StereoEyeInput, 2>& eyes,
 		std::uint32_t guideWidth, std::uint32_t guideHeight,
-		std::uint32_t colorWidth, std::uint32_t colorHeight, const Tuning& tuning)
+		std::uint32_t colorWidth, std::uint32_t colorHeight, const Tuning& tuning,
+		bool forceReset)
 	{
 		return state_->ApplyStereo(device, context, color, eyes,
-			guideWidth, guideHeight, colorWidth, colorHeight, tuning);
+			guideWidth, guideHeight, colorWidth, colorHeight, tuning, forceReset);
 	}
 
 	void Renderer::Reset() { state_->Reset(); }
