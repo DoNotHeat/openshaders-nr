@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstddef>
 
 namespace NeuralRendering
 {
@@ -37,13 +38,20 @@ namespace NeuralRendering
 		std::uint32_t skipLoggedFrame = 0;
 		bool skinMaskLogged = false;
 
+		// Layout must mirror SkinMaskParams in SkinMaskCompositeCS.hlsl:
+		// maskScale (offset 0), rampScale (offset 8), pad, debugVisualize (offset 16).
+		// A mismatch here made rampScale read the debug flag -> weight = 0 everywhere
+		// (invisible effect AND dead debug view).
 		struct SkinMaskCB
 		{
 			float maskScaleX;
 			float maskScaleY;
+			float rampScale;
+			float pad0;
 			std::uint32_t debugVisualize;
-			float pad[5];
+			float pad1[3];
 		};
+		static_assert(offsetof(SkinMaskCB, debugVisualize) == 16, "SkinMaskCB layout must match SkinMaskParams cbuffer");
 		static_assert(sizeof(SkinMaskCB) % 16 == 0);
 
 		bool IsSkinMaskEnabled(const FoveatedRender& foveated)
@@ -131,8 +139,11 @@ namespace NeuralRendering
 
 			SkinMaskCB cbData{};
 			// Normalized render/display mapping; both SBS spaces share origin (0,0).
+			// rampScale 2.0 maps Masks.y 0.5 (beast face) and 1.0 (human face) to full
+			// weight, and spreads bilinear edge values (0..0.5) into a soft feather.
 			cbData.maskScaleX = maskWidth / static_cast<float>(colorW);
 			cbData.maskScaleY = maskHeight / static_cast<float>(colorH);
+			cbData.rampScale = 2.0f;
 			cbData.debugVisualize = debugVisualize ? 1u : 0u;
 			skinMaskCB->Update(&cbData, sizeof(cbData));
 
@@ -427,6 +438,8 @@ namespace NeuralRendering
 		const std::uint32_t evalHeight = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(outHeight * qualityScale));
 		const bool preScaleActive = evalWidth < outWidth || evalHeight < outHeight;
 
+		const Util::Subrect::UVRegion* eyeUVs[2]{ &leftUV, &rightUV };
+
 		CS_GPU_PASS("NeuralRendering::FoveatedLdrBeforeUI");
 		ID3D11RenderTargetView* savedRTVs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
 		ID3D11DepthStencilView* savedDSV = nullptr;
@@ -463,8 +476,7 @@ namespace NeuralRendering
 		// Neural Quality < 100%: downsample the WHOLE subrect (color from kTOTAL,
 		// depth/mvec guides) into eval-sized textures. The pre-scale pass runs per
 		// eye; ApplyStereo then crops from these eval-sized textures.
-		if (preScaleActive) {
-			if (!EnsurePreScaleResources(total.texture, evalWidth, evalHeight)) {
+		if (preScaleActive) {			if (!EnsurePreScaleResources(total.texture, evalWidth, evalHeight)) {
 				context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRTVs, savedDSV);
 				for (auto*& rtv : savedRTVs)
 					if (rtv) rtv->Release();
@@ -541,7 +553,6 @@ namespace NeuralRendering
 			}
 		}
 
-		const Util::Subrect::UVRegion* eyeUVs[2]{ &leftUV, &rightUV };
 		std::array<Renderer::StereoEyeInput, 2> inputs{};
 		for (std::uint32_t eye = 0; eye < 2; ++eye) {
 			const auto& uv = *eyeUVs[eye];
