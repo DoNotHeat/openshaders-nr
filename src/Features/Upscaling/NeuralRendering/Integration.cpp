@@ -184,7 +184,7 @@ namespace NeuralRendering
 		// strength roughly when the region reaches the new fixation point.
 		static float nrIntensityScale = 1.0f;
 		constexpr float kMoveFadePerFrame = 0.4f;    // toward 0 while moving
-		constexpr float kSettleFadePerFrame = 0.2f;  // back toward 1 when still
+		constexpr float kSettleFadePerFrame = 0.35f; // back toward 1 when still
 		const float targetScale = foveated.subrectMovedThisFrame ? 0.0f : 1.0f;
 		const float fadeRate = (targetScale < nrIntensityScale) ? kMoveFadePerFrame : kSettleFadePerFrame;
 		nrIntensityScale += (targetScale - nrIntensityScale) * fadeRate;
