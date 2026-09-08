@@ -390,6 +390,26 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 			gazeMovedPx(offsetL, lastGazeOffsetUV), gazeMovedPx(offsetR, lastGazeOffsetRightUV));
 		if (remainingPx < 16.0f)
 			gazeGlideActive = false;
+		// Per-frame glide diagnostics: one line per eye per moving frame.
+		// step= is this frame's applied step, remain= distance still open to
+		// the (drifting) EMA target, gate= what triggered this frame's move
+		// (L latch | S saccade | D dwell), lat= latch state after this frame.
+		// Reveals whether a perceived double redraw is one continuous glide
+		// or two separate gate trips (two L-runs in the log).
+		static uint glideLogBudget = 3000;
+		if (glideLogBudget > 0) {
+			--glideLogBudget;
+			logger::info("[GLIDE-DIAG] frame={} eye=L step={:.1f} remain={:.1f} drift={:.1f} gate={}{}{} latch={}",
+				globals::state ? globals::state->frameCount : 0, gazeMovedPx(lastGazeOffsetUV, prevL),
+				gazeMovedPx(offsetL, lastGazeOffsetUV), leftDriftPx,
+				gazeOverThresholdFrames[0] >= kGazeDwellFrames ? 'D' : '-',
+				leftSaccade ? 'S' : '-', gazeGlideActive ? 'L' : '-', gazeGlideActive ? 1 : 0);
+			logger::info("[GLIDE-DIAG] frame={} eye=R step={:.1f} remain={:.1f} drift={:.1f} gate={}{}{} latch={}",
+				globals::state ? globals::state->frameCount : 0, gazeMovedPx(lastGazeOffsetRightUV, prevR),
+				gazeMovedPx(offsetR, lastGazeOffsetRightUV), rightDriftPx,
+				gazeOverThresholdFrames[1] >= kGazeDwellFrames ? 'D' : '-',
+				rightSaccade ? 'S' : '-', gazeGlideActive ? 'L' : '-', gazeGlideActive ? 1 : 0);
+		}
 		// Re-arm the dwell counters against the NEW position with a 2x
 		// deadzone: the region must not re-trigger until the gaze has drifted
 		// well past the just-applied offset.
