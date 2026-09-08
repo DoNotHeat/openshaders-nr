@@ -45,32 +45,6 @@ namespace FoveatedRenderEyeTracking
 	}
 
 	/**
-	 * @brief Applies deadzone filtering to gaze movement
-	 *
-	 * Prevents small jittery movements from updating the foveation center
-	 * by requiring a minimum pixel movement threshold.
-	 *
-	 * @param gazeNDC Current gaze position in NDC space (-1..1)
-	 * @param previousGazeNDC Previous gaze position in NDC space
-	 * @param thresholdPixels Minimum pixel movement in half-screen space
-	 * @return true if movement exceeds threshold, false if within deadzone
-	 */
-	inline bool HasSignificantGazeMovement(
-		const float* gazeNDC,
-		const float* previousGazeNDC,
-		float thresholdPixels)
-	{
-		// Convert NDC offset to pixel space (assume 1920x1080 half-res VR eye)
-		// NDC range -1..1 maps to 0..1920 (half width for one eye in SBS)
-		constexpr float pixelsPerNDCUnit = 960.0f;  // 1920 / 2
-
-		const float dx = (gazeNDC[0] - previousGazeNDC[0]) * pixelsPerNDCUnit;
-		const float dy = (gazeNDC[1] - previousGazeNDC[1]) * pixelsPerNDCUnit;
-
-		return std::sqrt(dx * dx + dy * dy) > thresholdPixels;
-	}
-
-	/**
 	 * @brief Clamps gaze point to center region of eye
 	 *
 	 * Prevents foveation center from being pushed too far to the edges
