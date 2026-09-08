@@ -259,6 +259,15 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	// fixed (not user-tunable): the subrect's movement responsiveness is
 	// governed by FOV Move Threshold + Glide Factor below, and a second
 	// smoothing knob on the same motion read as a duplicate.
+	//
+	// The EMA tail is also what caused double redraws: after a saccade the
+	// smoothed target keeps converging toward the raw gaze for ~10 frames,
+	// so a region that jumped to the smoothed point was still ~300 px behind
+	// the real gaze and a second gate trip re-jumped it. A two-stage filter
+	// fixes this without a visible glide: the RAW point is used for the
+	// subrect target (no tail to chase), while the EMA point stays for the
+	// debug overlay. Deadzone/dwell still gate the jump, so tracker noise
+	// cannot teleport the region.
 	constexpr float kGazeSmoothingAlpha = 0.2f;
 	// Per-eye calibration bias: subtract before smoothing so the whole
 	// pipeline (overlay, subrect offset) sees the corrected point.
@@ -280,20 +289,30 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	// result in UV units. Gaze NDC y is up while UV y is down, so the Y offset
 	// is negated. SetGazeOffset applies the offset on top of the base crop
 	// (never accumulating) and mirrors the X offset for the right eye.
-	//
-	// Hysteresis: the subrect only moves when the gaze drifts more than a
-	// threshold (in pixels) from the last applied position. Every subrect move
-	// resets DLSS's temporal history, which reads as a flicker, so a stationary
-	// gaze must keep the subrect (and its history) perfectly still. Without
-	// this, tracker noise keeps nudging the subrect and DLSS never accumulates
-	// a stable history — constant shimmering as if DLSS were off.
+	// The subrect target uses the RAW corrected gaze, not the EMA point: a
+	// single-jump region must land where the eye actually is, or the EMA
+	// convergence tail forces a second gate trip (double redraw).
 	const float maxSubrectOffsetUV = 0.3f;
+	float rawL[2];
+	float rawR[2];
+	{
+		const float rawLeftNDC[2] = {
+			sample.gazeNDCLeft[0] - settings.eyeTrackingBiasX,
+			sample.gazeNDCLeft[1] - settings.eyeTrackingBiasY
+		};
+		const float rawRightNDC[2] = {
+			sample.gazeNDCRight[0] - settings.eyeTrackingBiasX,
+			sample.gazeNDCRight[1] - settings.eyeTrackingBiasY
+		};
+		FoveatedRenderEyeTracking::GazeToSubrectOffset(rawLeftNDC, maxSubrectOffsetUV, rawL);
+		FoveatedRenderEyeTracking::GazeToSubrectOffset(rawRightNDC, maxSubrectOffsetUV, rawR);
+	}
 	float offsetL[2];
 	float offsetR[2];
-	FoveatedRenderEyeTracking::GazeToSubrectOffset(
-		eyeTrackingData.smoothedGazeLeft, maxSubrectOffsetUV, offsetL);
-	FoveatedRenderEyeTracking::GazeToSubrectOffset(
-		eyeTrackingData.smoothedGazeRight, maxSubrectOffsetUV, offsetR);
+	offsetL[0] = rawL[0];
+	offsetL[1] = rawL[1];
+	offsetR[0] = rawR[0];
+	offsetR[1] = rawR[1];
 
 	const auto renderSize = Util::ConvertToDynamic(globals::state->screenSize);
 	const float eyeWidthPx = std::max(1.0f, renderSize.x * 0.5f);
@@ -357,11 +376,12 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	const bool anyMoved = gazeGlideActive;
 	subrectMovedThisFrame = anyMoved;
 	if (subrectMovedThisFrame) {
-		// Glide toward the target: apply a fraction of the remaining distance
-		// per frame. The factor is tuned so the region arrives within a few
-		// frames of the saccade — pinhole reprojection lets DLSS follow fast
-		// crops, and a slow glide made the region land after the eye already
-		// focused (visible rebuild on NPCs at the new fixation point).
+		// Jump/glide toward the target. The target is the RAW corrected gaze,
+		// so a 1.0 glide factor (instant jump) lands exactly where the eye is
+		// and no tail follows — the EMA point would force a second gate trip.
+		// Lower factors still glide for users who prefer motion over jumps.
+		// Pinhole reprojection lets DLSS follow any step size without losing
+		// its history, and NR fades via its own intensity easing.
 		const float glide = settings.eyeTrackingFovGlideFactor;
 		auto glideToward = [&](float* last, const float* target) {
 			last[0] += (target[0] - last[0]) * glide;
@@ -381,11 +401,9 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 		const float stepPx = std::max(
 			gazeMovedPx(lastGazeOffsetUV, prevL), gazeMovedPx(lastGazeOffsetRightUV, prevR));
 		subrectMovedThisFrame = stepPx > 2.0f;
-		// End the glide once both zones have essentially arrived. The re-arm
-		// deadzone below must NOT gate this: the EMA target drifts for frames
-		// after the saccade, so dropping the latch as soon as the drift dips
-		// inside 2x deadzone stops the glide short and forces a second redraw
-		// when the dwell re-triggers on the resumed drift.
+		// End the glide once both zones have essentially arrived. With the raw
+		// target this trips on the very next frame after a 1.0 jump; it only
+		// matters for sub-1.0 glide factors.
 		const float remainingPx = std::max(
 			gazeMovedPx(offsetL, lastGazeOffsetUV), gazeMovedPx(offsetR, lastGazeOffsetRightUV));
 		if (remainingPx < 16.0f)
