@@ -201,6 +201,7 @@ namespace FoveatedRenderImpl
 			uint32_t dstX = (i == 1 ? p.eyeWidthOut : 0) + dstCropX;
 			BlendSubrectToOutput(Core::vrSubrectColorOut[i]->resource.get(), p.colorDst, p.colorDstUAV,
 				dstX, dstCropY, subOutW, subOutH);
+		}
 
 		return true;
 	}
