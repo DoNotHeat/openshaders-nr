@@ -180,6 +180,15 @@ struct FoveatedRender
 	// two separate region redraws — the latch keeps it moving until arrival.
 	bool gazeGlideActive = false;
 
+	// Per-eye subrect movement delta of the LAST applied move (UV units of
+	// the per-eye region, gaze UV convention: y up). Consumers that keep
+	// temporal state tied to the subrect position (Neural Rendering's motion
+	// vectors) add this delta to their stored vectors instead of resetting
+	// their history — CheekyFoveatedDLSS-style crop motion compensation:
+	// previousLocal = currentLocal + sceneMotion + currentOrigin - prevOrigin.
+	// Zero while the subrect is still.
+	float2 lastSubrectDeltaUV[2] = { { 0.0f, 0.0f }, { 0.0f, 0.0f } };
+
 	/**
 	 * @brief Current gaze-following subrect offset for one eye, in NDC units.
 	 *

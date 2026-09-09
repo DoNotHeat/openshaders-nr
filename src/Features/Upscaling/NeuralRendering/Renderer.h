@@ -24,6 +24,13 @@ namespace NeuralRendering
 			std::uint32_t sourceY = 0;
 			float motionVectorScaleX = 1.0f;
 			float motionVectorScaleY = 1.0f;
+			// Subrect movement delta since the last evaluated frame, in mvec
+			// vector units (mvecScale applied). Non-zero on gaze-following
+			// move frames: the mvec crop gets the delta added so the NGX
+			// Feature 18 temporal history survives the crop move (Cheeky-
+			// FoveatedDLSS-style crop motion compensation).
+			float cropMotionOffsetX = 0.0f;
+			float cropMotionOffsetY = 0.0f;
 		};
 
 		static Renderer& Instance();

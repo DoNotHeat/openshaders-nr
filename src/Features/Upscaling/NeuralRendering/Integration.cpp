@@ -649,6 +649,13 @@ namespace NeuralRendering
 				.sourceY = y,
 				.motionVectorScaleX = motionScaleX * FoveatedRenderImpl::Core::vrSubrectInW,
 				.motionVectorScaleY = motionScaleY * FoveatedRenderImpl::Core::vrSubrectInH,
+				// Crop-motion compensation: convert this eye's subrect delta
+				// (gaze UV units, y up) into mvec vector units. The guide mvec
+				// texture stores vectors in normalized screen UV; the delta in
+				// those units is the UV delta itself (negated y: gaze UV is y
+				// up, screen UV is y down). Non-zero only on move frames.
+				.cropMotionOffsetX = foveated.lastSubrectDeltaUV[eye].x,
+				.cropMotionOffsetY = -foveated.lastSubrectDeltaUV[eye].y,
 			};
 		}
 		// Point the evaluate at the eval-sized prescaled inputs. sourceX/Y stay at

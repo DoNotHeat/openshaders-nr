@@ -1,6 +1,7 @@
 #include "Renderer.h"
 
 #include "D3D12Interop.h"
+#include "Globals.h"
 #include "GpuPass.h"
 #include "Utils/LazyShader.h"
 
@@ -59,6 +60,103 @@ namespace NeuralRendering
 			SharedTexture motionVectors;
 			SharedTexture output;
 		};
+
+		// Crop-motion compensation constants — layout must match
+		// CropMotionCB in CropMotionCS.hlsl.
+		struct CropMotionCB
+		{
+			std::uint32_t baseX;
+			std::uint32_t baseY;
+			std::uint32_t sizeX;
+			std::uint32_t sizeY;
+			float offsetX;
+			float offsetY;
+			std::uint32_t sourceSizeX;
+			std::uint32_t sourceSizeY;
+		};
+		static_assert(sizeof(CropMotionCB) % 16 == 0);
+
+		/// Writes a compensated copy of the eye's mvec crop into
+		/// eye.motionVectors: every stored vector gets the subrect movement
+		/// delta (in vector units) added, then the whole crop is rescaled to
+		/// the evaluate grid. Point-sampled, per CheekyFoveatedDLSS's
+		/// crop_motion approach — NGX keeps its temporal history across
+		/// subrect moves instead of tracking phantom motion.
+		bool ApplyCropMotionCompensation(ID3D11DeviceContext* context, std::uint32_t eyeIndex,
+			const D3D11_TEXTURE2D_DESC& mvecSourceDesc, float offsetX, float offsetY)
+		{
+			auto& eye = eyes[eyeIndex];
+			D3D11_TEXTURE2D_DESC sharedDesc{};
+			eye.motionVectors.resource11->GetDesc(&sharedDesc);
+			const std::uint32_t sourceW = mvecSourceDesc.Width;
+			const std::uint32_t sourceH = mvecSourceDesc.Height;
+
+			CropMotionCB cbData{};
+			// The mvec guide was cropped at (0,0) of the per-eye subrect guide
+			// texture, so the source read origin is zero; the compensation is
+			// expressed purely through the movement offset.
+			cbData.baseX = 0;
+			cbData.baseY = 0;
+			cbData.sizeX = sharedDesc.Width;
+			cbData.sizeY = sharedDesc.Height;
+			cbData.offsetX = offsetX;
+			cbData.offsetY = offsetY;
+			cbData.sourceSizeX = sourceW;
+			cbData.sourceSizeY = sourceH;
+
+			if (!cropMotionCB)
+				cropMotionCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<CropMotionCB>(), "NeuralRendering::CropMotionCB");
+			if (!cropMotionCS) {
+				cropMotionCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(
+					L"Data\\Shaders\\Upscaling\\NeuralRendering\\CropMotionCS.hlsl", {}, "cs_5_0")));
+				Util::SetResourceName(cropMotionCS.get(), "NeuralRendering::CropMotionCS");
+				if (!cropMotionCS)
+					return false;
+			}
+			if (!cropMotionSRV || cropMotionSRVOwner != eye.motionVectors.resource11.Get()) {
+				cropMotionSRV = nullptr;
+				D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+				srvDesc.Format = sharedDesc.Format;
+				srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+				srvDesc.Texture2DArray.MostDetailedMip = 0;
+				srvDesc.Texture2DArray.MipLevels = 1;
+				srvDesc.Texture2DArray.FirstArraySlice = 0;
+				srvDesc.Texture2DArray.ArraySize = 1;
+				if (FAILED(globals::d3d::device->CreateShaderResourceView(
+						eye.motionVectors.resource11.Get(), &srvDesc, cropMotionSRV.put())))
+					return false;
+				cropMotionSRVOwner = eye.motionVectors.resource11.Get();
+			}
+			if (!cropMotionUAV || cropMotionUAVOwner != eye.motionVectors.resource11.Get()) {
+				cropMotionUAV = nullptr;
+				D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+				uavDesc.Format = DXGI_FORMAT_R32G32_FLOAT;
+				uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+				uavDesc.Texture2D.MipSlice = 0;
+				if (FAILED(globals::d3d::device->CreateUnorderedAccessView(
+						eye.motionVectors.resource11.Get(), &uavDesc, cropMotionUAV.put())))
+					return false;
+				cropMotionUAVOwner = eye.motionVectors.resource11.Get();
+			}
+
+			cropMotionCB->Update(&cbData, sizeof(cbData));
+			ID3D11Buffer* cb = cropMotionCB->CB();
+			ID3D11ShaderResourceView* srv = cropMotionSRV.get();
+			ID3D11UnorderedAccessView* uav = cropMotionUAV.get();
+			context->CSSetConstantBuffers(0, 1, &cb);
+			context->CSSetShaderResources(0, 1, &srv);
+			context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+			context->CSSetShader(cropMotionCS.get(), nullptr, 0);
+			context->Dispatch((sharedDesc.Width + 7) / 8, (sharedDesc.Height + 7) / 8, 1);
+			ID3D11ShaderResourceView* nullSRV = nullptr;
+			ID3D11UnorderedAccessView* nullUAV = nullptr;
+			ID3D11Buffer* nullCB = nullptr;
+			context->CSSetShaderResources(0, 1, &nullSRV);
+			context->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
+			context->CSSetConstantBuffers(0, 1, &nullCB);
+			context->CSSetShader(nullptr, nullptr, 0);
+			return true;
+		}
 
 		bool Apply(ID3D11Device* device, ID3D11DeviceContext* context, std::uint32_t eyeIndex,
 			ID3D11Resource* color, ID3D11Resource* depth, ID3D11ShaderResourceView* depthSRV,
@@ -153,6 +251,25 @@ namespace NeuralRendering
 				if (!CopyDepthGuide(context, input.depthSRV, eye.depth.uav11.Get(), guideWidth, guideHeight))
 					return LatchFailure("depth guide conversion", E_FAIL);
 				context->CopyResource(eye.motionVectors.resource11.Get(), input.motionVectors);
+
+				// Crop-motion compensation (CheekyFoveatedDLSS approach): on
+				// gaze-following move frames add the subrect's own movement
+				// delta to the stored vectors so the NGX temporal history
+				// survives the crop move instead of tracking phantom motion.
+				// The shared mvec texture is R32G32_FLOAT and already holds
+				// the eye's crop, so the pass reads it with base 0 and the
+				// offset converted to mvec-vector units.
+				D3D11_TEXTURE2D_DESC mvecSourceDesc{};
+				if (input.cropMotionOffsetX != 0.0f || input.cropMotionOffsetY != 0.0f) {
+					D3D11_TEXTURE2D_DESC srcDesc{};
+					if (GetTextureDesc(input.motionVectors, srcDesc) &&
+						!ApplyCropMotionCompensation(context, eyeIndex, srcDesc,
+							input.cropMotionOffsetX, input.cropMotionOffsetY)) {
+						// Compensation failure is non-fatal: fall back to a
+						// history reset for this eye so the network rebuilds.
+						resetPending[eyeIndex] = true;
+					}
+				}
 			}
 
 			ID3D12GraphicsCommandList* commandList = nullptr;
@@ -215,6 +332,12 @@ namespace NeuralRendering
 			resetPending = { true, true };
 			failureLatched = false;
 			copyDepthGuideCS.Reset();
+			cropMotionCB.reset();
+			cropMotionCS = nullptr;
+			cropMotionSRV = nullptr;
+			cropMotionUAV = nullptr;
+			cropMotionSRVOwner = nullptr;
+			cropMotionUAVOwner = nullptr;
 		}
 
 		void ResetHistory()
@@ -312,6 +435,12 @@ namespace NeuralRendering
 
 		D3D12Interop interop;
 		Util::LazyShader<ID3D11ComputeShader> copyDepthGuideCS;
+		eastl::unique_ptr<ConstantBuffer> cropMotionCB;
+		winrt::com_ptr<ID3D11ComputeShader> cropMotionCS;
+		winrt::com_ptr<ID3D11ShaderResourceView> cropMotionSRV;
+		winrt::com_ptr<ID3D11UnorderedAccessView> cropMotionUAV;
+		ID3D11Resource* cropMotionSRVOwner = nullptr;
+		ID3D11Resource* cropMotionUAVOwner = nullptr;
 		std::array<EyeResources, 2> eyes;
 		std::array<bool, 2> resetPending{ true, true };
 		bool failureLatched = false;

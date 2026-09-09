@@ -398,6 +398,12 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 		gazeGlideActive = true;
 	const bool anyMoved = gazeGlideActive;
 	subrectMovedThisFrame = anyMoved;
+	// No glide running: the applied delta is zero this frame (the mvec
+	// compensation consumer treats a zero delta as "no correction needed").
+	if (!anyMoved) {
+		lastSubrectDeltaUV[0] = { 0.0f, 0.0f };
+		lastSubrectDeltaUV[1] = { 0.0f, 0.0f };
+	}
 	if (subrectMovedThisFrame) {
 		// Jump/glide toward the target. The target is the RAW corrected gaze,
 		// so a 1.0 glide factor (instant jump) lands exactly where the eye is
@@ -424,6 +430,12 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 		const float stepPx = std::max(
 			gazeMovedPx(lastGazeOffsetUV, prevL), gazeMovedPx(lastGazeOffsetRightUV, prevR));
 		subrectMovedThisFrame = stepPx > 2.0f;
+		// Store the per-eye applied delta (gaze UV convention) for motion-vector
+		// compensation in the Neural Rendering path: while the subrect glides,
+		// the mvec guides get the delta added so NGX keeps its temporal history
+		// instead of being reset on every move frame.
+		lastSubrectDeltaUV[0] = { lastGazeOffsetUV[0] - prevL[0], lastGazeOffsetUV[1] - prevL[1] };
+		lastSubrectDeltaUV[1] = { lastGazeOffsetRightUV[0] - prevR[0], lastGazeOffsetRightUV[1] - prevR[1] };
 		// End the glide once both zones have essentially arrived. With the raw
 		// target this trips on the very next frame after a 1.0 jump; it only
 		// matters for sub-1.0 glide factors.
