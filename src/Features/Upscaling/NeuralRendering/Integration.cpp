@@ -10,7 +10,9 @@
 #include "GpuPass.h"
 
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <algorithm>
 #include <cstddef>
 
 namespace NeuralRendering
@@ -83,6 +85,12 @@ namespace NeuralRendering
 
 		// Gameplay gating state: skip logging every frame while the gate is held.
 		std::uint32_t gateLoggedFrame = 0;
+
+		// Intensity ramp state: while a gate skips the pass the level is held
+		// at 0; after the gate releases it eases back to 1 over
+		// neuralRenderingIntensityRamp seconds so the resume doesn't pop.
+		float intensityRampLevel = 1.0f;
+		std::chrono::steady_clock::time_point lastRampTime{};
 
 		/// True when a gameplay gate (sprint/combat) asks for the DLSSNR pass to
 		/// be skipped this frame. Reads player state through the cached globals.
@@ -394,6 +402,8 @@ namespace NeuralRendering
 		// internally; skipping frames is safe because the next evaluated frame resumes
 		// from that history.
 		if (ShouldSkipForCharacterMask(foveated, frame)) {
+			intensityRampLevel = 0.0f;
+			lastRampTime = std::chrono::steady_clock::now();
 			lastAppliedFrame = frame;
 			return true;
 		}
@@ -401,8 +411,25 @@ namespace NeuralRendering
 		// Gameplay gating skip: sprint/combat gates free the GPU exactly when
 		// frames matter most. Same history-safe skip as the character gate.
 		if (ShouldSkipForGameplayGate(foveated, frame)) {
+			intensityRampLevel = 0.0f;
+			lastRampTime = std::chrono::steady_clock::now();
 			lastAppliedFrame = frame;
 			return true;
+		}
+
+		// Ease the intensity back in after a gate releases: 0 = snap to full
+		// intensity instantly, N seconds = linear ramp so the effect fades in
+		// instead of popping back after a sprint/combat gate.
+		{
+			const auto now = std::chrono::steady_clock::now();
+			const float rampSeconds = foveated.settings.neuralRenderingIntensityRamp;
+			if (rampSeconds > 0.0f && intensityRampLevel < 1.0f) {
+				const float dt = std::chrono::duration<float>(now - lastRampTime).count();
+				intensityRampLevel = std::min(1.0f, intensityRampLevel + dt / rampSeconds);
+			} else if (rampSeconds <= 0.0f) {
+				intensityRampLevel = 1.0f;
+			}
+			lastRampTime = now;
 		}
 
 		// NR stays at full intensity every frame, including subrect-move
@@ -530,7 +557,7 @@ namespace NeuralRendering
 		}
 		const bool succeeded = Renderer::Instance().ApplyStereo(globals::d3d::device, context,
 			total.texture, inputs, FoveatedRenderImpl::Core::vrSubrectInW, FoveatedRenderImpl::Core::vrSubrectInH,
-			outWidth, outHeight, GetTuning(foveated.settings, 1.0f));
+			outWidth, outHeight, GetTuning(foveated.settings, intensityRampLevel));
 		if (succeeded) {
 			lastAppliedFrame = frame;
 			if (!writebackLogged) {

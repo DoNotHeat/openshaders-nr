@@ -34,6 +34,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingEnabled,
 	neuralRenderingPreset,
 	neuralRenderingIntensity,
+	neuralRenderingIntensityRamp,
 	neuralRenderingLocalTone,
 	neuralRenderingLocalStructure,
 	neuralRenderingSkinStructure,
@@ -144,6 +145,7 @@ void FoveatedRender::ClampSettings()
 	settings.neuralRenderingPreset = std::min(settings.neuralRenderingPreset, 4u);
 	settings.neuralRenderingCharacterRange = std::clamp(settings.neuralRenderingCharacterRange, 0.0f, 16384.0f);
 	settings.neuralRenderingIntensity = std::clamp(settings.neuralRenderingIntensity, 0.0f, 2.0f);
+	settings.neuralRenderingIntensityRamp = std::clamp(settings.neuralRenderingIntensityRamp, 0.0f, 1.0f);
 	settings.neuralRenderingLocalTone = std::clamp(settings.neuralRenderingLocalTone, 0.0f, 2.0f);
 	settings.neuralRenderingLocalStructure = std::clamp(settings.neuralRenderingLocalStructure, 0.0f, 2.0f);
 	settings.neuralRenderingSkinStructure = std::clamp(settings.neuralRenderingSkinStructure, 0.0f, 2.0f);
@@ -630,6 +632,13 @@ void FoveatedRender::DrawSettings()
 			}
 			bool custom = false;
 			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_intensity"), "Intensity"), &settings.neuralRenderingIntensity, 0.0f, 2.0f, "%.2f");
+			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_intensity_ramp"), "Intensity Ramp"), &settings.neuralRenderingIntensityRamp, 0.0f, 1.0f, "%.1f s");
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", T(TKEY("neural_rendering_intensity_ramp_tooltip"),
+					"Seconds to ease the intensity in after a gameplay gate (sprint/combat) or the character gate\n"
+					"stops skipping the pass. 0 = snap to full intensity instantly (the effect pops back);\n"
+					"1 = fade in over one second, so the resume doesn't read as a jarring switch."));
+			}
 			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_local_tone"), "Local Tone"), &settings.neuralRenderingLocalTone, 0.0f, 2.0f, "%.2f");
 			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_local_structure"), "Local Structure"), &settings.neuralRenderingLocalStructure, 0.0f, 2.0f, "%.2f");
 			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_skin_structure"), "Skin Structure"), &settings.neuralRenderingSkinStructure, 0.0f, 2.0f, "%.2f");

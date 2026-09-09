@@ -97,6 +97,11 @@ struct FoveatedRender
 		bool neuralRenderingEnabled = false;
 		uint neuralRenderingPreset = 3;
 		float neuralRenderingIntensity = 0.8f;
+		// Seconds to ease the intensity in after a gameplay/character gate
+		// stops skipping the pass. 0 = snap to full intensity instantly (the
+		// effect pops back); 1 = fade in over one second, so the resume after
+		// a sprint/combat gate doesn't read as a jarring switch.
+		float neuralRenderingIntensityRamp = 0.0f;  // [0, 1] seconds, 0.1 steps
 		float neuralRenderingLocalTone = 0.75f;
 		float neuralRenderingLocalStructure = 0.9f;
 		float neuralRenderingSkinStructure = 0.9f;
