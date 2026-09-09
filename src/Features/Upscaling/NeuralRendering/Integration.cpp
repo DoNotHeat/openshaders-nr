@@ -704,21 +704,24 @@ namespace NeuralRendering
 			// them. Composite the full frame: where the face mask is set, blend toward
 			// the DLSSNR result; elsewhere keep the original. Outside the subrects the
 			// neural input equals the original, so the blend is a no-op regardless of
-			// the mask. Both SBS spaces share origin (0,0), so a single normalized
-			// mapping covers both eyes.
-			//
-			// Neural-box stretch params: with Neural Quality < 100% the NR result for
-			// each eye sits in a proportionally-sized box at the subrect origin; the
-			// shader stretches it back over the full subrect. At 100% the box equals
-			// the subrect, so the params degenerate to identity mapping.
+			// regardless of the mask. Both SBS spaces share origin (0,0), so a
+			// single normalized mapping covers both eyes. The neural box params
+			// are identity at every quality level (see the boxScale comment).
 			auto& masks = renderer->GetRuntimeData().renderTargets[MASKS];
 			if (masks.SRV) {
 				D3D11_TEXTURE2D_DESC masksDesc{};
 				masks.texture->GetDesc(&masksDesc);
 				const float frameW = static_cast<float>(totalDesc.Width);
 				const float frameH = static_cast<float>(totalDesc.Height);
-				const float boxScaleX = static_cast<float>(evalWidth) / static_cast<float>(outWidth);
-				const float boxScaleY = static_cast<float>(evalHeight) / static_cast<float>(outHeight);
+				// The neural box is IDENTITY even below 100% quality: the evaluate
+				// runs with DLSSNR.Upscaling=1 and Scale=outWidth/evalWidth, so
+				// Feature 18 itself returns an outWidth x outHeight result and
+				// ApplyStereo writes the full-size subrect into kTOTAL. The old
+				// evalWidth/outWidth box scale double-stretched the composite —
+				// it sampled a corner-sized box of the frame, which read as
+				// characters turning into "portals" showing the surroundings.
+				const float boxScaleX = 1.0f;
+				const float boxScaleY = 1.0f;
 				const float boxOffsetXLeft = (static_cast<float>(eyeWidth * leftUV.x)) / frameW;
 				const float boxOffsetXRight = (static_cast<float>(eyeWidth) + static_cast<float>(eyeWidth * rightUV.x)) / frameW;
 				const float boxOffsetY = static_cast<float>(totalDesc.Height * leftUV.y) / frameH;
