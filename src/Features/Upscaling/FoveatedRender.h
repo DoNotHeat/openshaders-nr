@@ -147,6 +147,13 @@ struct FoveatedRender
 		// well above natural wander or the region — and the DLSS/NR temporal
 		// accumulation — churns constantly.
 		float eyeTrackingFovDeadzonePx = 300.0f;  // [50, 800]
+		// Target smoothing: EMA alpha applied to the raw gaze before it becomes
+		// the subrect's jump target. 1.0 = raw gaze (single clean jump, but the
+		// landing point carries tracker noise); lower values filter fixation
+		// drift and microsaccades out of the landing point at the cost of a
+		// short convergence tail (~4-6 frames at 0.4-0.5, still under the
+		// 8-frame dwell gate, so the single-jump behavior is preserved).
+		float eyeTrackingFovTargetSmoothing = 1.0f;  // [0.1, 1.0]
 		// Glide speed dial: the region covers its remaining distance over
 		// 1/factor frames once a move starts (0.2 = 5 frames, 1.0 = snap).
 		// Pinhole reprojection lets DLSS follow fast crops, so the glide can
@@ -177,6 +184,13 @@ struct FoveatedRender
 	// under convergence.
 	float lastGazeOffsetUV[2] = { 0.0f, 0.0f };
 	float lastGazeOffsetRightUV[2] = { 0.0f, 0.0f };
+
+	// EMA-smoothed jump target per eye (UV units, gaze convention). Updated
+	// every frame from the raw corrected gaze at eyeTrackingFovTargetSmoothing
+	// alpha; the subrect glides toward this instead of the raw point so
+	// tracker noise does not jitter the landing position. At alpha 1.0 this
+	// equals the raw gaze (previous behavior).
+	float gazeTargetUV[2][2] = { { 0.0f, 0.0f }, { 0.0f, 0.0f } };
 
 	// Consecutive frames each eye's gaze has exceeded the move threshold.
 	// The subrect only starts moving after kGazeDwellFrames consecutive

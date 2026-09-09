@@ -53,6 +53,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	eyeTrackingBiasX,
 	eyeTrackingBiasY,
 	eyeTrackingFovDeadzonePx,
+	eyeTrackingFovTargetSmoothing,
 	eyeTrackingFovGlideFactor);
 
 // ============================================================================
@@ -169,6 +170,7 @@ void FoveatedRender::ClampSettings()
 	settings.eyeTrackingBiasX = std::clamp(settings.eyeTrackingBiasX, -0.5f, 0.5f);
 	settings.eyeTrackingBiasY = std::clamp(settings.eyeTrackingBiasY, -0.5f, 0.5f);
 	settings.eyeTrackingFovDeadzonePx = std::clamp(settings.eyeTrackingFovDeadzonePx, 50.0f, 800.0f);
+	settings.eyeTrackingFovTargetSmoothing = std::clamp(settings.eyeTrackingFovTargetSmoothing, 0.1f, 1.0f);
 	settings.eyeTrackingFovGlideFactor = std::clamp(settings.eyeTrackingFovGlideFactor, 0.05f, 1.0f);
 	// Preset clamping reads from Upscaling::Settings now.
 	auto& sharedPreset = globals::features::upscaling.settings.presetDLSS;
@@ -335,10 +337,26 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	}
 	float offsetL[2];
 	float offsetR[2];
-	offsetL[0] = rawL[0];
-	offsetL[1] = rawL[1];
-	offsetR[0] = rawR[0];
-	offsetR[1] = rawR[1];
+	// The jump target is an EMA of the raw corrected gaze (alpha = user
+	// setting). At 1.0 this is the raw point (previous behavior: single clean
+	// jump, but the landing carries tracker noise). Below 1.0 the fixation
+	// drift and microsaccades are filtered out of the landing position, so
+	// identical looks land in the same place. The EMA updates EVERY frame —
+	// including while the region is anchored — so by the time a saccade
+	// trips the gate the target has already converged and no tail follows
+	// (the tail is what caused double redraws at the old fixed alpha 0.2;
+	// at 0.4-0.5 convergence takes 4-6 frames, under the 8-frame dwell).
+	const float targetAlpha = settings.eyeTrackingFovTargetSmoothing;
+	for (uint eye = 0; eye < 2; ++eye) {
+		const float* raw = (eye == 0) ? rawL : rawR;
+		float* target = gazeTargetUV[eye];
+		target[0] += (raw[0] - target[0]) * targetAlpha;
+		target[1] += (raw[1] - target[1]) * targetAlpha;
+	}
+	offsetL[0] = gazeTargetUV[0][0];
+	offsetL[1] = gazeTargetUV[0][1];
+	offsetR[0] = gazeTargetUV[1][0];
+	offsetR[1] = gazeTargetUV[1][1];
 
 	const auto renderSize = Util::ConvertToDynamic(globals::state->screenSize);
 	const float eyeWidthPx = std::max(1.0f, renderSize.x * 0.5f);
@@ -941,6 +959,15 @@ void FoveatedRender::DrawSettings()
 			}
 			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_fov_deadzone"), "FOV Deadzone"),
 				&settings.eyeTrackingFovDeadzonePx, 50.0f, 800.0f, "%.0f px");
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", "Smoothing of the jump target (EMA alpha).\n"
+					"1.0 = raw gaze: single clean jump, but the landing point\n"
+					"carries tracker noise and can wobble between identical looks.\n"
+					"Lower values filter fixation drift out of the landing point\n"
+					"(0.4-0.5 recommended; still fast enough to keep the single jump).");
+			}
+			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_fov_target_smoothing"), "FOV Target Smoothing"),
+				&settings.eyeTrackingFovTargetSmoothing, 0.1f, 1.0f, "%.2f");
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				ImGui::Text("%s", "Glide speed: the region covers its remaining\n"
 					"distance over ~1/factor frames once a move starts.\n"
