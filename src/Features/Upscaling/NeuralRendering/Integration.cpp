@@ -99,8 +99,12 @@ namespace NeuralRendering
 			bool gate = false;
 			const char* reason = nullptr;
 			// Sprint before run: a sprint also sets the running bit, so the more
-			// specific reason must win the log label.
-			if (settings.neuralRenderingDisableWhileSprinting && player->IsSprinting()) {
+			// specific reason must win the log label. The actorState1.sprinting
+			// bit is unreliable on the player; the animation graph variable is
+			// what the engine itself drives during a sprint.
+			bool sprinting = false;
+			if (settings.neuralRenderingDisableWhileSprinting &&
+				player->GetGraphVariableBool("IsSprinting", sprinting) && sprinting) {
 				gate = true;
 				reason = "sprinting";
 			}
