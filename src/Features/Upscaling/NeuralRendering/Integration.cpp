@@ -97,7 +97,10 @@ namespace NeuralRendering
 
 			bool gate = false;
 			const char* reason = nullptr;
-			if (settings.neuralRenderingDisableWhileSprinting && player->IsRunning()) {
+			// IsSprinting, not IsRunning: the actorState running bit is set by
+			// ordinary run-speed movement, and the gate must fire only on
+			// actual sprint bursts.
+			if (settings.neuralRenderingDisableWhileSprinting && player->IsSprinting()) {
 				gate = true;
 				reason = "sprinting";
 			}
