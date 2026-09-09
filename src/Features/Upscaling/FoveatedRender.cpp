@@ -45,6 +45,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingQuality,
 	neuralRenderingSkinMaskDebug,
 	neuralRenderingDisableWhileSprinting,
+	neuralRenderingDisableWhileRunning,
+	neuralRenderingDisableWhileSneaking,
 	neuralRenderingDisableWhileInCombat,
 	eyeTrackingFoveationEnabled,
 	eyeTrackingDebugOverlay,
@@ -719,6 +721,21 @@ void FoveatedRender::DrawSettings()
 					"Skips the whole neural pass while the player sprints — the effect is barely visible at sprint "
 					"speed and the pass costs real GPU time exactly when frames matter most. Re-enables shortly "
 					"after sprinting stops."));
+			}
+			custom |= ImGui::Checkbox(T(TKEY("neural_rendering_disable_running"), "Disable While Running"),
+				&settings.neuralRenderingDisableWhileRunning);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", T(TKEY("neural_rendering_disable_running_tooltip"),
+					"Skips the neural pass during ordinary run-speed movement (stricter than the sprint gate — "
+					"use it if you only want the effect while standing or walking). Note sprinting also sets the "
+					"running state."));
+			}
+			custom |= ImGui::Checkbox(T(TKEY("neural_rendering_disable_sneaking"), "Disable While Sneaking"),
+				&settings.neuralRenderingDisableWhileSneaking);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", T(TKEY("neural_rendering_disable_sneaking_tooltip"),
+					"Skips the neural pass while the player is sneaking — useful in stealth when character "
+					"detail matters less than framerate."));
 			}
 			custom |= ImGui::Checkbox(T(TKEY("neural_rendering_disable_combat"), "Disable While In Combat"),
 				&settings.neuralRenderingDisableWhileInCombat);

@@ -89,7 +89,8 @@ namespace NeuralRendering
 		bool ShouldSkipForGameplayGate(const FoveatedRender& foveated, std::uint32_t frame)
 		{
 			const auto& settings = foveated.settings;
-			if (!settings.neuralRenderingDisableWhileSprinting && !settings.neuralRenderingDisableWhileInCombat)
+			if (!settings.neuralRenderingDisableWhileSprinting && !settings.neuralRenderingDisableWhileRunning &&
+				!settings.neuralRenderingDisableWhileSneaking && !settings.neuralRenderingDisableWhileInCombat)
 				return false;
 			auto* player = globals::game::player;
 			if (!player)
@@ -97,12 +98,19 @@ namespace NeuralRendering
 
 			bool gate = false;
 			const char* reason = nullptr;
-			// IsSprinting, not IsRunning: the actorState running bit is set by
-			// ordinary run-speed movement, and the gate must fire only on
-			// actual sprint bursts.
+			// Sprint before run: a sprint also sets the running bit, so the more
+			// specific reason must win the log label.
 			if (settings.neuralRenderingDisableWhileSprinting && player->IsSprinting()) {
 				gate = true;
 				reason = "sprinting";
+			}
+			if (!gate && settings.neuralRenderingDisableWhileRunning && player->IsRunning()) {
+				gate = true;
+				reason = "running";
+			}
+			if (!gate && settings.neuralRenderingDisableWhileSneaking && player->IsSneaking()) {
+				gate = true;
+				reason = "sneaking";
 			}
 			if (!gate && settings.neuralRenderingDisableWhileInCombat && player->IsInCombat()) {
 				gate = true;

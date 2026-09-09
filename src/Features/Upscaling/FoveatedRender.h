@@ -124,6 +124,12 @@ struct FoveatedRender
 		// the neural detail is barely visible at sprint speed and the pass costs
 		// real GPU time exactly when frames matter most. Runtime toggle.
 		bool neuralRenderingDisableWhileSprinting = false;
+		// Skip DLSSNR during ordinary run-speed movement (a lighter gate than
+		// the sprint one, for players who only want the effect while standing
+		// or walking). Runtime toggle.
+		bool neuralRenderingDisableWhileRunning = false;
+		// Skip DLSSNR while the player is sneaking. Runtime toggle.
+		bool neuralRenderingDisableWhileSneaking = false;
 		// Skip DLSSNR while the player is in combat. Combat is when the frames
 		// matter most and the effect is least noticed. Runtime toggle.
 		bool neuralRenderingDisableWhileInCombat = false;
