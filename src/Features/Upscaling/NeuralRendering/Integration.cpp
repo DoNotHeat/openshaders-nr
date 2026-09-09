@@ -39,19 +39,41 @@ namespace NeuralRendering
 		bool skinMaskLogged = false;
 
 		// Layout must mirror SkinMaskParams in SkinMaskCompositeCS.hlsl:
-		// maskScale (offset 0), rampScale (offset 8), pad, debugVisualize (offset 16).
-		// A mismatch here made rampScale read the debug flag -> weight = 0 everywhere
-		// (invisible effect AND dead debug view).
-		struct SkinMaskCB
+		// maskScale (0), rampScale (8), debugVisualize (16), then the neural-box
+		// stretch params (20+). The box params MUST be filled: NeuralSample falls
+		// into its box-stretch branch when scale < 0.999, and zeros there sample
+		// NeuralColor at the frame corner — the "black silhouette tinted by the
+		// environment" bug.
+		// HLSL cbuffer packing differs from C++ struct layout: in HLSL,
+		// debugVisualize lands at offset 16 (after maskScale+rampScale+pad),
+		// and neuralBoxScale lands at offset 24 (after the 4-byte pad2 gap).
+		// The C++ struct is deliberately shaped to match: an extra pad member
+		// before debugVisualize pushes it to 20, and pad2's slot is filled by
+		// neuralBoxScaleX at 24. offsetof asserts pin the contract.
+		// Layout mirrors the HLSL SkinMaskParams cbuffer (see SkinMaskCompositeCS.hlsl).
+		// alignas(16) is deliberate — cbuffer sizes must be 16-byte multiples — and the
+		// padding warning C4324 is suppressed locally: the explicit pad members make
+		// the layout deterministic, the compiler warning just restates that fact.
+#pragma warning(push)
+#pragma warning(disable: 4324)  // structure was padded due to alignment specifier
+		struct alignas(16) SkinMaskCB
 		{
 			float maskScaleX;
 			float maskScaleY;
 			float rampScale;
 			float pad0;
 			std::uint32_t debugVisualize;
+			float pad2;
+			float neuralBoxScaleX;
+			float neuralBoxScaleY;
+			float neuralBoxOffsetX;
+			float neuralBoxOffsetY;
+			float neuralBoxOffsetXRight;
 			float pad1[3];
 		};
+#pragma warning(pop)
 		static_assert(offsetof(SkinMaskCB, debugVisualize) == 16, "SkinMaskCB layout must match SkinMaskParams cbuffer");
+		static_assert(offsetof(SkinMaskCB, neuralBoxScaleX) == 24, "SkinMaskCB layout must match SkinMaskParams cbuffer");
 		static_assert(sizeof(SkinMaskCB) % 16 == 0);
 
 		bool IsSkinMaskEnabled(const FoveatedRender& foveated)
@@ -123,12 +145,15 @@ namespace NeuralRendering
 		/// (GBuffer Masks.y) is set, the frame blends toward the DLSSNR result;
 		/// elsewhere the original pixels are kept. Outside the foveal subrects the
 		/// neural input equals the original, so the blend is a no-op there
-		/// regardless of the mask.
+		/// regardless of the mask. The neural box stretch params (box scale/origins)
+		/// map the NR result back over the full subrect when Neural Quality < 100%.
 		bool CompositeWithSkinMask(ID3D11DeviceContext* context,
 			ID3D11ShaderResourceView* originalSRV, ID3D11ShaderResourceView* neuralSRV,
 			ID3D11UnorderedAccessView* dstUAV,
 			float maskWidth, float maskHeight, std::uint32_t colorW, std::uint32_t colorH,
-			bool debugVisualize)
+			bool debugVisualize,
+			float neuralBoxScaleX, float neuralBoxScaleY,
+			float neuralBoxOffsetX, float neuralBoxOffsetY, float neuralBoxOffsetXRight)
 		{
 			auto& masks = globals::game::renderer->GetRuntimeData().renderTargets[MASKS];
 			if (!masks.SRV || !originalSRV || !neuralSRV || !dstUAV)
@@ -145,6 +170,11 @@ namespace NeuralRendering
 			cbData.maskScaleY = maskHeight / static_cast<float>(colorH);
 			cbData.rampScale = 2.0f;
 			cbData.debugVisualize = debugVisualize ? 1u : 0u;
+			cbData.neuralBoxScaleX = neuralBoxScaleX;
+			cbData.neuralBoxScaleY = neuralBoxScaleY;
+			cbData.neuralBoxOffsetX = neuralBoxOffsetX;
+			cbData.neuralBoxOffsetY = neuralBoxOffsetY;
+			cbData.neuralBoxOffsetXRight = neuralBoxOffsetXRight;
 			skinMaskCB->Update(&cbData, sizeof(cbData));
 
 			if (!skinMaskCompositeCS) {
@@ -612,15 +642,28 @@ namespace NeuralRendering
 			// neural input equals the original, so the blend is a no-op regardless of
 			// the mask. Both SBS spaces share origin (0,0), so a single normalized
 			// mapping covers both eyes.
+			//
+			// Neural-box stretch params: with Neural Quality < 100% the NR result for
+			// each eye sits in a proportionally-sized box at the subrect origin; the
+			// shader stretches it back over the full subrect. At 100% the box equals
+			// the subrect, so the params degenerate to identity mapping.
 			auto& masks = renderer->GetRuntimeData().renderTargets[MASKS];
 			if (masks.SRV) {
 				D3D11_TEXTURE2D_DESC masksDesc{};
 				masks.texture->GetDesc(&masksDesc);
+				const float frameW = static_cast<float>(totalDesc.Width);
+				const float frameH = static_cast<float>(totalDesc.Height);
+				const float boxScaleX = static_cast<float>(evalWidth) / static_cast<float>(outWidth);
+				const float boxScaleY = static_cast<float>(evalHeight) / static_cast<float>(outHeight);
+				const float boxOffsetXLeft = (static_cast<float>(eyeWidth * leftUV.x)) / frameW;
+				const float boxOffsetXRight = (static_cast<float>(eyeWidth) + static_cast<float>(eyeWidth * rightUV.x)) / frameW;
+				const float boxOffsetY = static_cast<float>(totalDesc.Height * leftUV.y) / frameH;
 				if (CompositeWithSkinMask(context,
 						originalColor->srv.get(), total.SRV, compositeColor->uav.get(),
 						static_cast<float>(masksDesc.Width), static_cast<float>(masksDesc.Height),
 						totalDesc.Width, totalDesc.Height,
-						foveated.settings.neuralRenderingSkinMaskDebug)) {
+						foveated.settings.neuralRenderingSkinMaskDebug,
+						boxScaleX, boxScaleY, boxOffsetXLeft, boxOffsetY, boxOffsetXRight)) {
 					context->CopyResource(total.texture, compositeColor->resource.get());
 				}
 			} else {
