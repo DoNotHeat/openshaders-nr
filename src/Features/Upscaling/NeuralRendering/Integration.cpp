@@ -639,11 +639,16 @@ namespace NeuralRendering
 				.sourceY = y,
 				.motionVectorScaleX = motionScaleX * FoveatedRenderImpl::Core::vrSubrectInW,
 				.motionVectorScaleY = motionScaleY * FoveatedRenderImpl::Core::vrSubrectInH,
-				// Crop-motion compensation: convert this eye's subrect delta
-				// (gaze UV units, y up) into mvec vector units. The guide mvec
-				// texture stores vectors in normalized screen UV; the delta in
-				// those units is the UV delta itself (negated y: gaze UV is y
-				// up, screen UV is y down). Non-zero only on move frames.
+				// Crop-motion compensation: convert this eye's subrect delta to
+				// mvec vector units. Skyrim's mvec texture stores UV deltas in
+				// full-eye units, y-down (MotionBlur::GetSSMotionVector's
+				// (-0.5, 0.5) NDC->UV scale). Per-eye UV units match full-eye
+				// UV units (both normalized to the same eye), so only the Y
+				// axis needs the gaze-up -> screen-down flip. The +delta sign
+				// follows Cheeky's previousLocal = currentLocal + sceneMotion
+				// + currentOrigin - previousOrigin (mv points current ->
+				// previous, the crop moved by +delta, so stored vectors grow
+				// by delta). Non-zero only on move frames.
 				.cropMotionOffsetX = foveated.lastSubrectDeltaUV[eye].x,
 				.cropMotionOffsetY = -foveated.lastSubrectDeltaUV[eye].y,
 			};
@@ -657,6 +662,15 @@ namespace NeuralRendering
 				inputs[eye].depthSRV = preScaleDepth[eye]->srv.get();
 				inputs[eye].motionVectors = preScaleMvec[eye]->resource.get();
 			}
+		}
+		// Crop-motion compensation diagnostic: log the applied per-eye delta on
+		// move frames so sign/unit mistakes show up as numbers, not just as
+		// on-screen artifacts.
+		static std::uint32_t motionCompLoggedFrame = 0;
+		if (foveated.subrectMovedThisFrame && frame - motionCompLoggedFrame > 120) {
+			motionCompLoggedFrame = frame;
+			logger::info("[DLSSNR] crop motion compensation delta=({:.4f},{:.4f}) frame={}",
+				foveated.lastSubrectDeltaUV[0].x, foveated.lastSubrectDeltaUV[0].y, frame);
 		}
 		const bool succeeded = Renderer::Instance().ApplyStereo(globals::d3d::device, context,
 			total.texture, inputs, FoveatedRenderImpl::Core::vrSubrectInW, FoveatedRenderImpl::Core::vrSubrectInH,
