@@ -112,11 +112,6 @@ struct FoveatedRender
 		// whole DLSSNR pass is skipped like the no-character case. 0 disables
 		// range gating. Only used with neuralRenderingSkinMaskOnly.
 		float neuralRenderingCharacterRange = 2048.0f;
-		// Neural quality: percentage of the foveal subrect area the DLSSNR pass
-		// evaluates (centered sub-box). Cost scales with the area — 40% quality
-		// costs ~40% of the neural pass. Snapped to 20% steps. VR foveated route
-		// only.
-		uint neuralRenderingQuality = 100;
 		// Dev: render the face-mask weight instead of the composite to verify
 		// coverage. Only read when neuralRenderingSkinMaskOnly is on.
 		bool neuralRenderingSkinMaskDebug = false;

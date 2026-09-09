@@ -127,43 +127,6 @@ namespace NeuralRendering
 			return gate;
 		}
 
-		struct PreScaleCB
-		{
-			float originX;
-			float originY;
-			float sizeX;
-			float sizeY;
-		};
-
-		// Neural Quality < 100%: eval-sized (downsampled) color/depth/mvec textures,
-		// lazily (re)created when the eval size changes.
-		eastl::unique_ptr<Texture2D> preScaleColor[2];
-		eastl::unique_ptr<Texture2D> preScaleDepth[2];
-		eastl::unique_ptr<Texture2D> preScaleMvec[2];
-		std::uint32_t preScaleW = 0;
-		std::uint32_t preScaleH = 0;
-		winrt::com_ptr<ID3D11ComputeShader> neuralPreScaleCS;
-		eastl::unique_ptr<ConstantBuffer> preScaleCB;
-
-		bool EnsurePreScaleResources(ID3D11Resource* source, std::uint32_t evalW, std::uint32_t evalH)
-		{
-			if (preScaleColor[0] && preScaleW == evalW && preScaleH == evalH)
-				return true;
-			for (std::uint32_t eye = 0; eye < 2; ++eye) {
-				preScaleColor[eye] = Upscaling::CreateTextureFromSource(source, evalW, evalH, false, true, true,
-					eye == 0 ? "NeuralRendering::PreScaleColorL" : "NeuralRendering::PreScaleColorR");
-				preScaleDepth[eye] = Upscaling::CreateTextureFromSource(source, evalW, evalH, false, true, true,
-					eye == 0 ? "NeuralRendering::PreScaleDepthL" : "NeuralRendering::PreScaleDepthR");
-				preScaleMvec[eye] = Upscaling::CreateTextureFromSource(source, evalW, evalH, false, true, true,
-					eye == 0 ? "NeuralRendering::PreScaleMvecL" : "NeuralRendering::PreScaleMvecR");
-				if (!preScaleColor[eye] || !preScaleDepth[eye] || !preScaleMvec[eye])
-					return false;
-			}
-			preScaleW = evalW;
-			preScaleH = evalH;
-			return true;
-		}
-
 		/// True when the DLSSNR pass should be skipped this frame: the character mask
 		/// is on and either no character draw happened, or the nearest character is
 		/// beyond the user's range (0 = range gating disabled).
@@ -499,18 +462,6 @@ namespace NeuralRendering
 		const std::uint32_t outWidth = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(eyeWidth * leftUV.w));
 		const std::uint32_t outHeight = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(totalDesc.Height * leftUV.h));
 
-		// Neural Quality: evaluate only a scaled portion of the foveal subrect. NGX
-		// cost scales with the evaluated area, so 50% quality costs ~25% of the pass.
-		// The WHOLE subrect is downsampled (color from kTOTAL, guides from the
-		// subrect textures) into eval-sized textures — cropping the top-left corner
-		// would feed NGX a zoomed fragment desynced from the guides (temporal
-		// flicker). ApplyStereo then crops the eval-sized result back into kTOTAL.
-		const std::uint32_t quality = std::clamp(foveated.settings.neuralRenderingQuality, 25u, 100u);
-		const float qualityScale = static_cast<float>(quality) / 100.0f;
-		const std::uint32_t evalWidth = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(outWidth * qualityScale));
-		const std::uint32_t evalHeight = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(outHeight * qualityScale));
-		const bool preScaleActive = evalWidth < outWidth || evalHeight < outHeight;
-
 		const Util::Subrect::UVRegion* eyeUVs[2]{ &leftUV, &rightUV };
 
 		CS_GPU_PASS("NeuralRendering::FoveatedLdrBeforeUI");
@@ -546,102 +497,11 @@ namespace NeuralRendering
 			context->CopyResource(originalColor->resource.get(), total.texture);
 		}
 
-		// Neural Quality < 100%: downsample the WHOLE subrect (color from kTOTAL,
-		// depth/mvec guides) into eval-sized textures. The pre-scale pass runs per
-		// eye; ApplyStereo then crops from these eval-sized textures.
-		if (preScaleActive) {			if (!EnsurePreScaleResources(total.texture, evalWidth, evalHeight)) {
-				context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRTVs, savedDSV);
-				for (auto*& rtv : savedRTVs)
-					if (rtv) rtv->Release();
-				if (savedDSV) savedDSV->Release();
-				return false;
-			}
-			CS_GPU_PASS("NeuralRendering::PreScale");
-			if (!preScaleCB)
-				preScaleCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<PreScaleCB>(), "NeuralRendering::PreScaleCB");
-			if (!neuralPreScaleCS) {
-				neuralPreScaleCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(
-					L"Data\\Shaders\\Upscaling\\NeuralRendering\\NeuralPreScaleCS.hlsl", {}, "cs_5_0")));
-				Util::SetResourceName(neuralPreScaleCS.get(), "NeuralRendering::NeuralPreScaleCS");
-			}
-			if (!neuralPreScaleCS || !preScaleCB) {
-				context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRTVs, savedDSV);
-				for (auto*& rtv : savedRTVs)
-					if (rtv) rtv->Release();
-				if (savedDSV) savedDSV->Release();
-				return false;
-			}
-			for (std::uint32_t eye = 0; eye < 2; ++eye) {
-				const auto& uv = *eyeUVs[eye];
-				PreScaleCB cbData{};
-				cbData.originX = (eye ? 0.5f : 0.0f) + static_cast<float>(eyeWidth * uv.x) / static_cast<float>(totalDesc.Width);
-				cbData.originY = static_cast<float>(totalDesc.Height * uv.y) / static_cast<float>(totalDesc.Height);
-				cbData.sizeX = static_cast<float>(outWidth) / static_cast<float>(totalDesc.Width);
-				cbData.sizeY = static_cast<float>(outHeight) / static_cast<float>(totalDesc.Height);
-				preScaleCB->Update(&cbData, sizeof(cbData));
-
-				if (!skinMaskSampler) {
-					D3D11_SAMPLER_DESC samplerDesc{};
-					samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-					samplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-					samplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-					samplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-					if (FAILED(globals::d3d::device->CreateSamplerState(&samplerDesc, skinMaskSampler.put()))) {
-						context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRTVs, savedDSV);
-						for (auto*& rtv : savedRTVs)
-							if (rtv) rtv->Release();
-						if (savedDSV) savedDSV->Release();
-						return false;
-					}
-					Util::SetResourceName(skinMaskSampler.get(), "NeuralRendering::SkinMaskSampler");
-				}
-
-				ID3D11ShaderResourceView* srvs[3] = {
-					total.SRV,
-					FoveatedRenderImpl::Core::vrSubrectDepth[eye]->srv.get(),
-					FoveatedRenderImpl::Core::vrSubrectMotionVectors[eye]->srv.get(),
-				};
-				ID3D11UnorderedAccessView* uavs[3] = {
-					preScaleColor[eye]->uav.get(),
-					preScaleDepth[eye]->uav.get(),
-					preScaleMvec[eye]->uav.get(),
-				};
-				ID3D11Buffer* cb = preScaleCB->CB();
-				ID3D11SamplerState* sampler = skinMaskSampler.get();
-
-				context->CSSetConstantBuffers(0, 1, &cb);
-				context->CSSetSamplers(0, 1, &sampler);
-				context->CSSetShaderResources(0, 3, srvs);
-				context->CSSetUnorderedAccessViews(0, 3, uavs, nullptr);
-				context->CSSetShader(neuralPreScaleCS.get(), nullptr, 0);
-				context->Dispatch((evalWidth + 7) / 8, (evalHeight + 7) / 8, 1);
-
-				ID3D11ShaderResourceView* nullSRVs[3]{};
-				ID3D11UnorderedAccessView* nullUAVs[3]{};
-				context->CSSetShaderResources(0, 3, nullSRVs);
-				context->CSSetUnorderedAccessViews(0, 3, nullUAVs, nullptr);
-				context->CSSetShader(nullptr, nullptr, 0);
-				ID3D11Buffer* nullCB = nullptr;
-				context->CSSetConstantBuffers(0, 1, &nullCB);
-			}
-		}
-
 		std::array<Renderer::StereoEyeInput, 2> inputs{};
 		for (std::uint32_t eye = 0; eye < 2; ++eye) {
 			const auto& uv = *eyeUVs[eye];
 			const std::uint32_t x = (eye ? eyeWidth : 0) + static_cast<std::uint32_t>(eyeWidth * uv.x);
 			const std::uint32_t y = static_cast<std::uint32_t>(totalDesc.Height * uv.y);
-			// Diagnostic: NR read/write position on kTOTAL, correlated by
-			// frame number with [FOVEATED-DIAG]. Per-eye statics: a shared
-			// timer would starve eye 1.
-			static std::chrono::steady_clock::time_point lastLog[2];
-			auto now = std::chrono::steady_clock::now();
-			if (now - lastLog[eye] > std::chrono::seconds(5)) {
-				lastLog[eye] = now;
-				logger::info("[DLSSNR-DIAG] NR writeback frame={} eye={} srcX={} srcY={} size={}x{} eyeWidth={} total={}x{} leftUV=({:.3f},{:.3f},{:.3f},{:.3f})",
-					frame, eye, x, y, outWidth, outHeight, eyeWidth, totalDesc.Width, totalDesc.Height,
-					leftUV.x, leftUV.y, leftUV.w, leftUV.h);
-			}
 
 			float motionScaleX = 1.0f;
 			float motionScaleY = 1.0f;
@@ -667,25 +527,6 @@ namespace NeuralRendering
 				.cropMotionOffsetX = foveated.lastSubrectDeltaUV[eye].x,
 				.cropMotionOffsetY = -foveated.lastSubrectDeltaUV[eye].y,
 			};
-		}
-		// Point the evaluate at the eval-sized prescaled inputs. sourceX/Y stay at
-		// the subrect origin: ApplyStereo crops evalW x evalH from the eval-sized
-		// textures (a full copy) and writes the result back into kTOTAL there.
-		if (preScaleActive) {
-			for (std::uint32_t eye = 0; eye < 2; ++eye) {
-				inputs[eye].depth = preScaleDepth[eye]->resource.get();
-				inputs[eye].depthSRV = preScaleDepth[eye]->srv.get();
-				inputs[eye].motionVectors = preScaleMvec[eye]->resource.get();
-			}
-		}
-		// Crop-motion compensation diagnostic: log the applied per-eye delta on
-		// move frames so sign/unit mistakes show up as numbers, not just as
-		// on-screen artifacts.
-		static std::uint32_t motionCompLoggedFrame = 0;
-		if (foveated.subrectMovedThisFrame && frame - motionCompLoggedFrame > 120) {
-			motionCompLoggedFrame = frame;
-			logger::info("[DLSSNR] crop motion compensation delta=({:.4f},{:.4f}) frame={}",
-				foveated.lastSubrectDeltaUV[0].x, foveated.lastSubrectDeltaUV[0].y, frame);
 		}
 		const bool succeeded = Renderer::Instance().ApplyStereo(globals::d3d::device, context,
 			total.texture, inputs, FoveatedRenderImpl::Core::vrSubrectInW, FoveatedRenderImpl::Core::vrSubrectInH,
@@ -752,12 +593,6 @@ namespace NeuralRendering
 		color[1].reset();
 		originalColor.reset();
 		compositeColor.reset();
-		for (auto& tex : preScaleColor) tex.reset();
-		for (auto& tex : preScaleDepth) tex.reset();
-		for (auto& tex : preScaleMvec) tex.reset();
-		preScaleW = preScaleH = 0;
-		neuralPreScaleCS = nullptr;
-		preScaleCB.reset();
 		skinMaskCompositeCS = nullptr;
 		skinMaskCB.reset();
 		colorWidth = colorHeight = 0;

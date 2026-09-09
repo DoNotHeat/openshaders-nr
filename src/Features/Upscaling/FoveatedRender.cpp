@@ -42,7 +42,6 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingUICorrection,
 	neuralRenderingSkinMaskOnly,
 	neuralRenderingCharacterRange,
-	neuralRenderingQuality,
 	neuralRenderingSkinMaskDebug,
 	neuralRenderingDisableWhileSprinting,
 	neuralRenderingDisableWhileRunning,
@@ -144,22 +143,6 @@ void FoveatedRender::ClampSettings()
 	settings.subrectRoundness = std::clamp(settings.subrectRoundness, 0.0f, 1.0f);
 	settings.neuralRenderingPreset = std::min(settings.neuralRenderingPreset, 4u);
 	settings.neuralRenderingCharacterRange = std::clamp(settings.neuralRenderingCharacterRange, 0.0f, 16384.0f);
-	// Neural quality is a dropdown preset (100/90/75/50/25); snap any stale or
-	// hand-edited value to the nearest valid option.
-	{
-		static constexpr uint kQualityOptions[] = { 100, 90, 75, 50, 25 };
-		uint best = kQualityOptions[0];
-		uint bestDiff = UINT_MAX;
-		for (uint option : kQualityOptions) {
-			const uint diff = option > settings.neuralRenderingQuality ? option - settings.neuralRenderingQuality :
-			                                                           settings.neuralRenderingQuality - option;
-			if (diff < bestDiff) {
-				bestDiff = diff;
-				best = option;
-			}
-		}
-		settings.neuralRenderingQuality = best;
-	}
 	settings.neuralRenderingIntensity = std::clamp(settings.neuralRenderingIntensity, 0.0f, 2.0f);
 	settings.neuralRenderingLocalTone = std::clamp(settings.neuralRenderingLocalTone, 0.0f, 2.0f);
 	settings.neuralRenderingLocalStructure = std::clamp(settings.neuralRenderingLocalStructure, 0.0f, 2.0f);
@@ -266,11 +249,6 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	if (!globals::game::isVR || !settings.eyeTrackingFoveationEnabled) {
 		subrectMovedThisFrame = false;
 		return;
-	}
-	static bool logOnce = false;
-	if (!logOnce) {
-		logger::info("[EYETRACK] UpdateEyeTrackingFoveation running (isVR={} enabled={})", globals::game::isVR, settings.eyeTrackingFoveationEnabled);
-		logOnce = true;
 	}
 
 	auto sample = FoveatedRenderEyeTracking::TryGetEyeTrackingData();
@@ -464,26 +442,6 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 			gazeMovedPx(offsetL, lastGazeOffsetUV), gazeMovedPx(offsetR, lastGazeOffsetRightUV));
 		if (remainingPx < 16.0f)
 			gazeGlideActive = false;
-		// Per-frame glide diagnostics: one line per eye per moving frame.
-		// step= is this frame's applied step, remain= distance still open to
-		// the (drifting) EMA target, gate= what triggered this frame's move
-		// (L latch | S saccade | D dwell), lat= latch state after this frame.
-		// Reveals whether a perceived double redraw is one continuous glide
-		// or two separate gate trips (two L-runs in the log).
-		static uint glideLogBudget = 3000;
-		if (glideLogBudget > 0) {
-			--glideLogBudget;
-			logger::info("[GLIDE-DIAG] frame={} eye=L step={:.1f} remain={:.1f} drift={:.1f} gate={}{}{} latch={}",
-				globals::state ? globals::state->frameCount : 0, gazeMovedPx(lastGazeOffsetUV, prevL),
-				gazeMovedPx(offsetL, lastGazeOffsetUV), leftDriftPx,
-				gazeOverThresholdFrames[0] >= kGazeDwellFrames ? 'D' : '-',
-				leftSaccade ? 'S' : '-', gazeGlideActive ? 'L' : '-', gazeGlideActive ? 1 : 0);
-			logger::info("[GLIDE-DIAG] frame={} eye=R step={:.1f} remain={:.1f} drift={:.1f} gate={}{}{} latch={}",
-				globals::state ? globals::state->frameCount : 0, gazeMovedPx(lastGazeOffsetRightUV, prevR),
-				gazeMovedPx(offsetR, lastGazeOffsetRightUV), rightDriftPx,
-				gazeOverThresholdFrames[1] >= kGazeDwellFrames ? 'D' : '-',
-				rightSaccade ? 'S' : '-', gazeGlideActive ? 'L' : '-', gazeGlideActive ? 1 : 0);
-		}
 		// Re-arm the dwell counters against the NEW position with a 2x
 		// deadzone: the region must not re-trigger until the gaze has drifted
 		// well past the just-applied offset.
@@ -699,26 +657,6 @@ void FoveatedRender::DrawSettings()
 					ImGui::Text("%s", T(TKEY("neural_rendering_character_range_tooltip"),
 						"Distance to the nearest character beyond which the neural pass is skipped entirely. "
 						"0 disables the distance gating (always evaluate when a character is visible)."));
-				}
-			}
-			{
-				// Quality dropdown: discrete render-scale presets. Cost scales with the
-				// evaluated area — 50% quality costs ~25% of the neural pass.
-				static const char* qualityOptions[] = { "100% (Full)", "90%", "75%", "50%", "25%" };
-				static const uint qualityValues[] = { 100, 90, 75, 50, 25 };
-				int qualityIndex = 0;
-				for (int i = 0; i < 5; ++i)
-					if (settings.neuralRenderingQuality == qualityValues[i])
-						qualityIndex = i;
-				if (ImGui::Combo(T(TKEY("neural_rendering_quality"), "Neural Quality"), &qualityIndex, qualityOptions, IM_ARRAYSIZE(qualityOptions))) {
-					settings.neuralRenderingQuality = qualityValues[qualityIndex];
-					custom = true;
-				}
-				if (auto _tt = Util::HoverTooltipWrapper()) {
-					ImGui::Text("%s", T(TKEY("neural_rendering_quality_tooltip"),
-						"Internal resolution of the neural pass as a percentage of the foveal region: the network "
-						"evaluates the whole region at reduced scale and the result is stretched back. Lower = fewer "
-						"pixels for the network = higher FPS at reduced neural detail. VR foveated route only."));
 				}
 			}
 			if (settings.neuralRenderingSkinMaskOnly) {

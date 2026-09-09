@@ -202,27 +202,6 @@ namespace FoveatedRenderImpl
 			BlendSubrectToOutput(Core::vrSubrectColorOut[i]->resource.get(), p.colorDst, p.colorDstUAV,
 				dstX, dstCropY, subOutW, subOutH);
 
-			// Diagnostic: DLSS subrect write position, correlated by frame
-			// number with [DLSSNR-DIAG]. colorDst dims are read from the
-			// texture itself to verify the write-target extent assumption.
-			// Per-eye statics: a shared timer would starve eye 1.
-			static std::chrono::steady_clock::time_point lastLog[2];
-			auto now = std::chrono::steady_clock::now();
-			if (now - lastLog[i] > std::chrono::seconds(5)) {
-				lastLog[i] = now;
-				uint32_t dstW = 0, dstH = 0;
-				if (winrt::com_ptr<ID3D11Texture2D> dstTex; SUCCEEDED(p.colorDst->QueryInterface(IID_PPV_ARGS(dstTex.put())))) {
-					D3D11_TEXTURE2D_DESC dstDesc{};
-					dstTex->GetDesc(&dstDesc);
-					dstW = dstDesc.Width;
-					dstH = dstDesc.Height;
-				}
-				logger::info("[FOVEATED-DIAG] DLSS writeback frame={} eye={} dstX={} dstCropY={} size={}x{} eyeWidthOut={} eyeHeightOut={} colorDstTex={}x{} renderSBS={}x{}",
-					globals::state ? globals::state->frameCount : 0, i, dstX, dstCropY, subOutW, subOutH,
-					p.eyeWidthOut, p.eyeHeightOut, dstW, dstH, p.renderW, p.renderH);
-			}
-		}
-
 		return true;
 	}
 
