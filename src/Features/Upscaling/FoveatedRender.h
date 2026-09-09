@@ -116,6 +116,13 @@ struct FoveatedRender
 		// Dev: render the face-mask weight instead of the composite to verify
 		// coverage. Only read when neuralRenderingSkinMaskOnly is on.
 		bool neuralRenderingSkinMaskDebug = false;
+		// Gameplay gating: skip the whole DLSSNR pass while the player sprints —
+		// the neural detail is barely visible at sprint speed and the pass costs
+		// real GPU time exactly when frames matter most. Runtime toggle.
+		bool neuralRenderingDisableWhileSprinting = false;
+		// Skip DLSSNR while the player is in combat. Combat is when the frames
+		// matter most and the effect is least noticed. Runtime toggle.
+		bool neuralRenderingDisableWhileInCombat = false;
 		// Eye tracking foveation
 		uint eyeTrackingFoveationEnabled = 0;  // Toggle for dynamic gaze-based foveation
 		uint eyeTrackingDebugOverlay = 0;  // 0=off, 1=crosshair, 2=crosshair + vignette mask

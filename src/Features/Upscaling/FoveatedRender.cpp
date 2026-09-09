@@ -44,6 +44,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingCharacterRange,
 	neuralRenderingQuality,
 	neuralRenderingSkinMaskDebug,
+	neuralRenderingDisableWhileSprinting,
+	neuralRenderingDisableWhileInCombat,
 	eyeTrackingFoveationEnabled,
 	eyeTrackingDebugOverlay,
 	eyeTrackingBiasX,
@@ -694,6 +696,23 @@ void FoveatedRender::DrawSettings()
 						"Renders the character mask instead of the composite: green = character pixels receiving the "
 						"neural effect, black = untouched pixels. Use this to verify mask coverage before judging the blend."));
 				}
+			}
+			ImGui::Separator();
+			ImGui::TextUnformatted(T(TKEY("neural_rendering_gating_header"), "Gameplay Gating"));
+			custom |= ImGui::Checkbox(T(TKEY("neural_rendering_disable_sprinting"), "Disable While Sprinting"),
+				&settings.neuralRenderingDisableWhileSprinting);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", T(TKEY("neural_rendering_disable_sprinting_tooltip"),
+					"Skips the whole neural pass while the player sprints — the effect is barely visible at sprint "
+					"speed and the pass costs real GPU time exactly when frames matter most. Re-enables shortly "
+					"after sprinting stops."));
+			}
+			custom |= ImGui::Checkbox(T(TKEY("neural_rendering_disable_combat"), "Disable While In Combat"),
+				&settings.neuralRenderingDisableWhileInCombat);
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", T(TKEY("neural_rendering_disable_combat_tooltip"),
+					"Skips the whole neural pass while the player is in combat. Combat is when the frames matter "
+					"most and the effect is least noticed."));
 			}
 			if (custom)
 				settings.neuralRenderingPreset = 0;

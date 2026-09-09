@@ -81,6 +81,37 @@ namespace NeuralRendering
 			return foveated.settings.neuralRenderingSkinMaskOnly;
 		}
 
+		// Gameplay gating state: skip logging every frame while the gate is held.
+		std::uint32_t gateLoggedFrame = 0;
+
+		/// True when a gameplay gate (sprint/combat) asks for the DLSSNR pass to
+		/// be skipped this frame. Reads player state through the cached globals.
+		bool ShouldSkipForGameplayGate(const FoveatedRender& foveated, std::uint32_t frame)
+		{
+			const auto& settings = foveated.settings;
+			if (!settings.neuralRenderingDisableWhileSprinting && !settings.neuralRenderingDisableWhileInCombat)
+				return false;
+			auto* player = globals::game::player;
+			if (!player)
+				return false;
+
+			bool gate = false;
+			const char* reason = nullptr;
+			if (settings.neuralRenderingDisableWhileSprinting && player->IsRunning()) {
+				gate = true;
+				reason = "sprinting";
+			}
+			if (!gate && settings.neuralRenderingDisableWhileInCombat && player->IsInCombat()) {
+				gate = true;
+				reason = "in combat";
+			}
+			if (gate && frame - gateLoggedFrame > 120) {
+				logger::info("[DLSSNR] gameplay gate: pass skipped while {} (frame={})", reason, frame);
+				gateLoggedFrame = frame;
+			}
+			return gate;
+		}
+
 		struct PreScaleCB
 		{
 			float originX;
@@ -385,6 +416,13 @@ namespace NeuralRendering
 		// internally; skipping frames is safe because the next evaluated frame resumes
 		// from that history.
 		if (ShouldSkipForCharacterMask(foveated, frame)) {
+			lastAppliedFrame = frame;
+			return true;
+		}
+
+		// Gameplay gating skip: sprint/combat gates free the GPU exactly when
+		// frames matter most. Same history-safe skip as the character gate.
+		if (ShouldSkipForGameplayGate(foveated, frame)) {
 			lastAppliedFrame = frame;
 			return true;
 		}
