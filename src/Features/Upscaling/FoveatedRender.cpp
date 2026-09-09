@@ -138,6 +138,7 @@ void FoveatedRender::ClampSettings()
 	settings.peripheryTemporalAlpha = std::clamp(settings.peripheryTemporalAlpha, 0.05f, 0.5f);
 	settings.subrectFeatherWidth = std::clamp(settings.subrectFeatherWidth, 2.0f, 128.0f);
 	settings.subrectDitherStrength = std::clamp(settings.subrectDitherStrength, 0.0f, 2.0f);
+	settings.subrectRoundness = std::clamp(settings.subrectRoundness, 0.0f, 1.0f);
 	settings.neuralRenderingPreset = std::min(settings.neuralRenderingPreset, 4u);
 	settings.neuralRenderingCharacterRange = std::clamp(settings.neuralRenderingCharacterRange, 0.0f, 16384.0f);
 	// Neural quality is a dropdown preset (100/90/75/50/25); snap any stale or
@@ -839,11 +840,19 @@ void FoveatedRender::DrawSettings()
 		case SubrectBlendMode::kFeather:
 			ImGui::TextWrapped(T(TKEY("foveated_blend_feather_desc"), "Smoothstep fade over N pixels at the boundary. Hides the seam."));
 			ImGui::SliderFloat(T(TKEY("foveated_feather_width"), "Feather Width"), &settings.subrectFeatherWidth, 2.0f, 128.0f, "%.0f px");
+			ImGui::SliderFloat(T(TKEY("foveated_roundness"), "Roundness"), &settings.subrectRoundness, 0.0f, 1.0f, "%.2f");
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", T(TKEY("foveated_roundness_tooltip"),
+					"Morphs the region boundary from a rectangle (0) toward an ellipse (1).\n"
+					"An oval region hides the corners of the upscaled area and reads more\n"
+					"naturally against the stretched periphery."));
+			}
 			break;
 		case SubrectBlendMode::kDither:
 			ImGui::TextWrapped(T(TKEY("foveated_blend_dither_desc"), "Noise-dithered fade — more natural-looking than feather at large subrects."));
 			ImGui::SliderFloat(T(TKEY("foveated_band_width"), "Band Width"), &settings.subrectFeatherWidth, 2.0f, 128.0f, "%.0f px");
 			ImGui::SliderFloat(T(TKEY("foveated_noise_amount"), "Noise Amount"), &settings.subrectDitherStrength, 0.0f, 2.0f, "%.2f");
+			ImGui::SliderFloat(T(TKEY("foveated_roundness"), "Roundness"), &settings.subrectRoundness, 0.0f, 1.0f, "%.2f");
 			break;
 		}
 

@@ -90,6 +90,10 @@ struct FoveatedRender
 		uint subrectBlendMode = static_cast<uint>(SubrectBlendMode::kHardCopy);
 		float subrectFeatherWidth = 64.0f;
 		float subrectDitherStrength = 1.0f;
+		// 0 = rectangular region, 1 = elliptical; superellipse morph of the
+		// feather boundary (CheekyFoveatedDLSS Roundness). Only affects the
+		// blend modes that read the boundary shape (Feather/Dither).
+		float subrectRoundness = 0.0f;
 		bool neuralRenderingEnabled = false;
 		uint neuralRenderingPreset = 3;
 		float neuralRenderingIntensity = 0.8f;

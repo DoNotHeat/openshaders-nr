@@ -15,7 +15,9 @@ cbuffer BlendCB : register(b0)
 	uint FrameIndex;       // For dither noise animation
 	uint SrcOffsetX;       // Source X offset (0 for most modes, non-zero for Extreme strip)
 	float DitherStrength;  // 0 = pure smooth gradient, 1 = natural noise, 2 = aggressive dither
-};
+	float Roundness;       // 0 = rectangular boundary, 1 = elliptical
+	float _pad0, _pad1;
+}
 
 Texture2D<float4> SrcTex : register(t0);    // DLSS subrect output
 RWTexture2D<float4> DstTex : register(u0);  // kMAIN (already has stretched background)
@@ -52,7 +54,21 @@ float BlueNoise(uint2 pos, uint frame)
 	float distR = (float)(SubWidth - 1 - tid.x);
 	float distT = (float)tid.y;
 	float distB = (float)(SubHeight - 1 - tid.y);
-	float edgeDist = min(min(distL, distR), min(distT, distB));
+
+	// Roundness morphs the boundary from a rectangle toward an ellipse
+	// (CheekyFoveatedDLSS). Scaled per-axis distance runs 0 at the center to
+	// 1 at the edge midpoints: max() is the rectangle's distance field (1 on
+	// its whole boundary), length() the ellipse's (1 at midpoints, >1 past
+	// the corners) — lerp sweeps the superellipse between.
+	float edgeDist;
+	if (Roundness > 0.0) {
+		float2 extent = float2(SubWidth, SubHeight) * 0.5;
+		float2 scaled = abs(tid + 0.5 - extent) / extent;
+		float shape = lerp(max(scaled.x, scaled.y), length(scaled), saturate(Roundness));
+		edgeDist = (1.0 - shape) * min(extent.x, extent.y);
+	} else {
+		edgeDist = min(min(distL, distR), min(distT, distB));
+	}
 
 	if (edgeDist >= FeatherWidth) {
 		// Interior: pure DLSS (fast path, skips background read)
