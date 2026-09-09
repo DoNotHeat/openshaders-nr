@@ -427,23 +427,13 @@ namespace NeuralRendering
 			return true;
 		}
 
-		// Gaze-following foveation moves the subrect between frames, and NR's
-		// temporal history lags the moved window — evaluating at full strength
-		// mid-move reads as breathing shadows / jittering surroundings. NR
-		// stays ON every frame (on/off switching flickers far worse); its
-		// Intensity eases toward zero while the subrect glides and recovers
-		// immediately as the steps shrink, so the effect is back at full
-		// strength roughly when the region reaches the new fixation point.
-		static float nrIntensityScale = 1.0f;
-		constexpr float kMoveFadePerFrame = 0.4f;    // toward 0 while moving
-		constexpr float kSettleFadePerFrame = 0.35f; // back toward 1 when still
-		const float targetScale = foveated.subrectMovedThisFrame ? 0.0f : 1.0f;
-		const float fadeRate = (targetScale < nrIntensityScale) ? kMoveFadePerFrame : kSettleFadePerFrame;
-		nrIntensityScale += (targetScale - nrIntensityScale) * fadeRate;
-		if (nrIntensityScale < 0.01f)
-			nrIntensityScale = 0.0f;
-		if (nrIntensityScale > 0.99f)
-			nrIntensityScale = 1.0f;
+		// NR stays at full intensity every frame, including subrect-move
+		// frames: the crop motion compensation below (mvec delta added to
+		// the guides) lets the NGX temporal history survive the crop move,
+		// so there is no need to fade the effect out while the region
+		// glides. The old intensity fade (0.4 down / 0.35 up per frame)
+		// read as "NR turns off while the square moves" and is obsolete
+		// now that history survives moves.
 
 		auto* renderer = globals::game::renderer;
 		auto* context = globals::d3d::context;
@@ -670,7 +660,7 @@ namespace NeuralRendering
 		}
 		const bool succeeded = Renderer::Instance().ApplyStereo(globals::d3d::device, context,
 			total.texture, inputs, FoveatedRenderImpl::Core::vrSubrectInW, FoveatedRenderImpl::Core::vrSubrectInH,
-			outWidth, outHeight, GetTuning(foveated.settings, nrIntensityScale));
+			outWidth, outHeight, GetTuning(foveated.settings, 1.0f));
 		if (succeeded) {
 			lastAppliedFrame = frame;
 			if (!writebackLogged) {
