@@ -103,6 +103,15 @@ namespace FoveatedRenderImpl
 		static inline winrt::com_ptr<ID3D11ShaderResourceView> vrBlendSrcSRV;
 		static inline ID3D11Resource* vrBlendSrcSRVOwner = nullptr;
 
+		// Crop motion compensation (Default subrect path): rewrites the
+		// cropped mvec with the subrect's own movement delta added so DLSS
+		// reprojects its history across gaze-following crop moves.
+		static inline winrt::com_ptr<ID3D11ComputeShader> vrCropMotionCS;
+		static inline winrt::com_ptr<ID3D11Buffer> vrCropMotionCB;
+		static inline eastl::unique_ptr<Texture2D> vrCropMotionScratch;
+		static inline winrt::com_ptr<ID3D11ShaderResourceView> vrCropMotionSrcSRV;
+		static inline ID3D11Resource* vrCropMotionSrcSRVOwner = nullptr;
+
 		// Subrect UV hash for resource recreation detection
 		static inline uint64_t activeSubrectUVHash = 0;
 		static inline uint32_t neuralGuidesFrame = UINT32_MAX;

@@ -83,7 +83,8 @@ namespace NeuralRendering
 		/// crop_motion approach — NGX keeps its temporal history across
 		/// subrect moves instead of tracking phantom motion.
 		bool ApplyCropMotionCompensation(ID3D11DeviceContext* context, std::uint32_t eyeIndex,
-			const D3D11_TEXTURE2D_DESC& mvecSourceDesc, float offsetX, float offsetY)
+			ID3D11Resource* mvecSource, const D3D11_TEXTURE2D_DESC& mvecSourceDesc,
+			float offsetX, float offsetY)
 		{
 			auto& eye = eyes[eyeIndex];
 			D3D11_TEXTURE2D_DESC sharedDesc{};
@@ -113,24 +114,31 @@ namespace NeuralRendering
 				if (!cropMotionCS)
 					return false;
 			}
-			if (!cropMotionSRV || cropMotionSRVOwner != eye.motionVectors.resource11.Get()) {
+			// The SRV reads the freshly cropped source and the UAV writes the
+			// shared history texture: binding both views on one resource would
+			// make the runtime unbind the SRV and the pass read nothing.
+			if (!cropMotionSRV || cropMotionSRVOwner != mvecSource) {
 				cropMotionSRV = nullptr;
 				D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-				srvDesc.Format = sharedDesc.Format;
+				srvDesc.Format = mvecSourceDesc.Format;
 				srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
 				srvDesc.Texture2DArray.MostDetailedMip = 0;
 				srvDesc.Texture2DArray.MipLevels = 1;
 				srvDesc.Texture2DArray.FirstArraySlice = 0;
 				srvDesc.Texture2DArray.ArraySize = 1;
 				if (FAILED(globals::d3d::device->CreateShaderResourceView(
-						eye.motionVectors.resource11.Get(), &srvDesc, cropMotionSRV.put())))
+						mvecSource, &srvDesc, cropMotionSRV.put())))
 					return false;
-				cropMotionSRVOwner = eye.motionVectors.resource11.Get();
+				cropMotionSRVOwner = mvecSource;
 			}
 			if (!cropMotionUAV || cropMotionUAVOwner != eye.motionVectors.resource11.Get()) {
 				cropMotionUAV = nullptr;
 				D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-				uavDesc.Format = DXGI_FORMAT_R32G32_FLOAT;
+				// UAV format must match the resource's own format (inherited
+				// from the game's kMOTION_VECTOR, R16G16_FLOAT) — a typed
+				// mismatch fails view creation and would silently degrade
+				// every compensation into a history reset.
+				uavDesc.Format = sharedDesc.Format;
 				uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
 				uavDesc.Texture2D.MipSlice = 0;
 				if (FAILED(globals::d3d::device->CreateUnorderedAccessView(
@@ -256,17 +264,18 @@ namespace NeuralRendering
 				// gaze-following move frames add the subrect's own movement
 				// delta to the stored vectors so the NGX temporal history
 				// survives the crop move instead of tracking phantom motion.
-				// The shared mvec texture is R32G32_FLOAT and already holds
-				// the eye's crop, so the pass reads it with base 0 and the
-				// offset converted to mvec-vector units.
+				// The pass reads the freshly cropped source (CopyResource above
+				// already filled the shared texture with the same content) and
+				// writes the compensated vectors back over it.
 				D3D11_TEXTURE2D_DESC mvecSourceDesc{};
 				if (input.cropMotionOffsetX != 0.0f || input.cropMotionOffsetY != 0.0f) {
 					D3D11_TEXTURE2D_DESC srcDesc{};
 					if (GetTextureDesc(input.motionVectors, srcDesc) &&
-						!ApplyCropMotionCompensation(context, eyeIndex, srcDesc,
+						!ApplyCropMotionCompensation(context, eyeIndex, input.motionVectors, srcDesc,
 							input.cropMotionOffsetX, input.cropMotionOffsetY)) {
 						// Compensation failure is non-fatal: fall back to a
 						// history reset for this eye so the network rebuilds.
+						logger::warn("[DLSSNR] crop motion compensation failed eye={} — resetting history", eyeIndex);
 						resetPending[eyeIndex] = true;
 					}
 				}

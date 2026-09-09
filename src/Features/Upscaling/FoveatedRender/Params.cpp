@@ -65,6 +65,14 @@ namespace FoveatedRenderImpl
 		p.jitterX = upscaling.jitter.x;
 		p.jitterY = upscaling.jitter.y;
 
+		// Crop motion compensation deltas (same source the Neural Rendering
+		// path consumes) so the DLSS crops reproject their history across
+		// gaze-following subrect moves too.
+		for (uint32_t eye = 0; eye < 2; ++eye) {
+			p.cropMotionDeltaX[eye] = enhancer.lastSubrectDeltaUV[eye].x;
+			p.cropMotionDeltaY[eye] = enhancer.lastSubrectDeltaUV[eye].y;
+		}
+
 		return p;
 	}
 }

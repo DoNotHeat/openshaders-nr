@@ -39,6 +39,11 @@ namespace FoveatedRenderImpl
 		float jitterX;
 		float jitterY;
 
+		// Per-eye subrect movement delta for this frame (gaze UV, y-up),
+		// consumed by DLSS crop-motion compensation; zero when no glide runs.
+		float cropMotionDeltaX[2];
+		float cropMotionDeltaY[2];
+
 		// Build a complete parameter block from current global state.
 		static VRDlssParams Resolve(
 			ID3D11Resource* upscalingTexture,

@@ -76,6 +76,16 @@ namespace FoveatedRenderImpl::Ops
 	void BlendSubrectToOutput(ID3D11Resource* dlssSrc, ID3D11Resource* dst, ID3D11UnorderedAccessView* dstUAV,
 		uint32_t dstOffsetX, uint32_t dstOffsetY, uint32_t subWidth, uint32_t subHeight, uint32_t srcOffsetX = 0);
 
+	// Rewrite the cropped mvec in place with the subrect's own movement delta
+	// added to every vector (CheekyFoveatedDLSS approach), so DLSS reprojects
+	// its temporal history across gaze-following crop moves instead of seeing
+	// phantom motion. cropDelta is the per-eye UV delta (gaze, y-up); mvec
+	// vectors are full-eye UV, y-down — only Y needs the sign flip here.
+	// Uses the shared CropMotionCS.hlsl with Size == SourceSize, which
+	// degenerates its grid conversion to identity.
+	void CropMotionCompensate(uint32_t eyeIndex, ID3D11Resource* subrectMvec,
+		float cropDeltaX, float cropDeltaY);
+
 	// Hash of per-eye UVs + mode for change detection (forces SL DLSS resource
 	// recreation). Both eyes are mixed in so asymmetric presets — e.g. Nasal
 	// Convergence, where rightUV differs from leftUV — don't collide on a

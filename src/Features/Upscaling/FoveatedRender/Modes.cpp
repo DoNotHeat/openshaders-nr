@@ -170,6 +170,12 @@ namespace FoveatedRenderImpl
 			if (p.transparencyMask)
 				context->CopySubresourceRegion(Core::vrSubrectTransparencyMask[i]->resource.get(), 0, 0, 0, 0, p.transparencyMask, 0, &sbsCrop);
 
+			// On glide frames the crop window itself moved; without correction
+			// DLSS reads the shifted view against unshifted vectors and its
+			// temporal history decays. Same compensation the NR path applies.
+			CropMotionCompensate(i, Core::vrSubrectMotionVectors[i]->resource.get(),
+				p.cropMotionDeltaX[i], p.cropMotionDeltaY[i]);
+
 			if (!DispatchUpscaleRegion(streamline, i,
 					Core::vrSubrectColorIn[i]->resource.get(), Core::vrSubrectColorOut[i]->resource.get(),
 					Core::vrSubrectDepth[i]->resource.get(), Core::vrSubrectMotionVectors[i]->resource.get(),

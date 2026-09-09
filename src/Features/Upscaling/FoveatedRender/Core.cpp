@@ -822,6 +822,127 @@ namespace FoveatedRenderImpl::Ops
 		context->CSSetShader(nullptr, nullptr, 0);
 	}
 
+	// Mirrors the CropMotionCB layout in NeuralRendering/CropMotionCS.hlsl.
+	struct CropMotionCB
+	{
+		uint32_t baseX;
+		uint32_t baseY;
+		uint32_t sizeX;
+		uint32_t sizeY;
+		float offsetX;
+		float offsetY;
+		uint32_t sourceSizeX;
+		uint32_t sourceSizeY;
+	};
+	static_assert(sizeof(CropMotionCB) % 16 == 0);
+
+	void CropMotionCompensate(uint32_t eyeIndex, ID3D11Resource* subrectMvec,
+		float cropDeltaX, float cropDeltaY)
+	{
+		// Only fires on glide frames (non-zero delta) — a static early-out
+		// keeps still-gaze frames free of any dispatch.
+		static float prevDelta[2] = { 0.0f, 0.0f };
+		const bool wasActive = prevDelta[eyeIndex] != 0.0f;
+		prevDelta[eyeIndex] = cropDeltaX + cropDeltaY;
+		if (cropDeltaX == 0.0f && cropDeltaY == 0.0f && !wasActive)
+			return;
+
+		auto device = globals::d3d::device;
+		auto context = globals::d3d::context;
+		if (!device || !context || !subrectMvec || eyeIndex >= 2)
+			return;
+
+		// Scratch copy as the read source: SRV and UAV on one resource would
+		// make the runtime unbind the SRV and the pass read nothing.
+		winrt::com_ptr<ID3D11Texture2D> mvecTex;
+		D3D11_TEXTURE2D_DESC desc{};
+		if (FAILED(subrectMvec->QueryInterface(IID_PPV_ARGS(mvecTex.put()))))
+			return;
+		mvecTex->GetDesc(&desc);
+		const bool scratchMatches = Core::vrCropMotionScratch &&
+			Core::vrCropMotionScratch->desc.Width == desc.Width &&
+			Core::vrCropMotionScratch->desc.Height == desc.Height &&
+			Core::vrCropMotionScratch->desc.Format == desc.Format;
+		if (!scratchMatches) {
+			D3D11_TEXTURE2D_DESC scratchDesc = desc;
+			scratchDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+			auto scratch = eastl::make_unique<Texture2D>(scratchDesc);
+			D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+			srvDesc.Format = desc.Format;
+			srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
+			srvDesc.Texture2DArray.MostDetailedMip = 0;
+			srvDesc.Texture2DArray.MipLevels = 1;
+			srvDesc.Texture2DArray.FirstArraySlice = 0;
+			srvDesc.Texture2DArray.ArraySize = 1;
+			if (FAILED(device->CreateShaderResourceView(scratch->resource.get(), &srvDesc, Core::vrCropMotionSrcSRV.put())))
+				return;
+			Util::SetResourceName(Core::vrCropMotionSrcSRV.get(), "FoveatedRender::CropMotionSrcSRV");
+			Core::vrCropMotionScratch = std::move(scratch);
+			Core::vrCropMotionSrcSRVOwner = nullptr;
+		}
+
+		if (!Core::vrCropMotionCS) {
+			Core::vrCropMotionCS.attach(static_cast<ID3D11ComputeShader*>(Util::CompileShader(
+				L"Data/Shaders/Upscaling/NeuralRendering/CropMotionCS.hlsl", {}, "cs_5_0")));
+			Util::SetResourceName(Core::vrCropMotionCS.get(), "FoveatedRender::CropMotionCS");
+			if (!Core::vrCropMotionCS)
+				return;
+		}
+		if (!Core::vrCropMotionCB) {
+			D3D11_BUFFER_DESC cbDesc = {};
+			cbDesc.ByteWidth = sizeof(CropMotionCB);
+			cbDesc.Usage = D3D11_USAGE_DYNAMIC;
+			cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+			cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+			if (FAILED(device->CreateBuffer(&cbDesc, nullptr, Core::vrCropMotionCB.put())))
+				return;
+			Util::SetResourceName(Core::vrCropMotionCB.get(), "FoveatedRender::CropMotionCB");
+		}
+
+		auto* scratch = Core::vrCropMotionScratch->resource.get();
+		context->CopyResource(scratch, subrectMvec);
+
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+		uavDesc.Format = desc.Format;
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+		uavDesc.Texture2D.MipSlice = 0;
+		winrt::com_ptr<ID3D11UnorderedAccessView> uav;
+		if (FAILED(device->CreateUnorderedAccessView(subrectMvec, &uavDesc, uav.put())))
+			return;
+
+		D3D11_MAPPED_SUBRESOURCE mapped{};
+		if (FAILED(context->Map(Core::vrCropMotionCB.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+			return;
+		auto* cb = reinterpret_cast<CropMotionCB*>(mapped.pData);
+		cb->baseX = 0;
+		cb->baseY = 0;
+		cb->sizeX = desc.Width;
+		cb->sizeY = desc.Height;
+		// CropMotionCS multiplies by Size/SourceSize; identity here keeps the
+		// offset and stored vectors in their original units.
+		cb->offsetX = cropDeltaX;
+		cb->offsetY = -cropDeltaY;
+		cb->sourceSizeX = desc.Width;
+		cb->sourceSizeY = desc.Height;
+		context->Unmap(Core::vrCropMotionCB.get(), 0);
+
+		ID3D11Buffer* cbs[] = { Core::vrCropMotionCB.get() };
+		ID3D11ShaderResourceView* srvs[] = { Core::vrCropMotionSrcSRV.get() };
+		ID3D11UnorderedAccessView* uavs[] = { uav.get() };
+		context->CSSetConstantBuffers(0, 1, cbs);
+		context->CSSetShaderResources(0, 1, srvs);
+		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+		context->CSSetShader(Core::vrCropMotionCS.get(), nullptr, 0);
+		context->Dispatch((desc.Width + 7) / 8, (desc.Height + 7) / 8, 1);
+		ID3D11ShaderResourceView* nullSRV[1] = {};
+		ID3D11UnorderedAccessView* nullUAV[1] = {};
+		ID3D11Buffer* nullCB[1] = {};
+		context->CSSetShaderResources(0, 1, nullSRV);
+		context->CSSetUnorderedAccessViews(0, 1, nullUAV, nullptr);
+		context->CSSetConstantBuffers(0, 1, nullCB);
+		context->CSSetShader(nullptr, nullptr, 0);
+	}
+
 }  // namespace FoveatedRenderImpl::Ops
 
 namespace FoveatedRenderImpl
@@ -893,6 +1014,12 @@ namespace FoveatedRenderImpl
 
 		vrBlendSrcSRV = nullptr;
 		vrBlendSrcSRVOwner = nullptr;
+
+		vrCropMotionCS = nullptr;
+		vrCropMotionCB = nullptr;
+		vrCropMotionScratch.reset();
+		vrCropMotionSrcSRV = nullptr;
+		vrCropMotionSrcSRVOwner = nullptr;
 
 		activeSubrectUVHash = 0;
 		neuralGuidesFrame = UINT32_MAX;
