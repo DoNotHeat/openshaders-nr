@@ -267,8 +267,12 @@ namespace NeuralRendering
 				// The pass reads the freshly cropped source (CopyResource above
 				// already filled the shared texture with the same content) and
 				// writes the compensated vectors back over it.
+				// A large jump (resetHistory) has no overlap to compensate —
+				// reset the history instead so the network rebuilds cleanly.
 				D3D11_TEXTURE2D_DESC mvecSourceDesc{};
-				if (input.cropMotionOffsetX != 0.0f || input.cropMotionOffsetY != 0.0f) {
+				if (input.resetHistory) {
+					resetPending[eyeIndex] = true;
+				} else if (input.cropMotionOffsetX != 0.0f || input.cropMotionOffsetY != 0.0f) {
 					D3D11_TEXTURE2D_DESC srcDesc{};
 					if (GetTextureDesc(input.motionVectors, srcDesc) &&
 						!ApplyCropMotionCompensation(context, eyeIndex, input.motionVectors, srcDesc,

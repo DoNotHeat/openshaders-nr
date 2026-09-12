@@ -31,6 +31,12 @@ namespace NeuralRendering
 			// FoveatedDLSS-style crop motion compensation).
 			float cropMotionOffsetX = 0.0f;
 			float cropMotionOffsetY = 0.0f;
+			// True when the subrect jumped more than the adaptive reset
+			// threshold (max(64px, 12.5% of crop size)) — CheekyFoveatedDLSS's
+			// GazeResetPolicy large_jump. Compensation cannot recover history
+			// for a jump that large (no overlap), so the NGX history is reset
+			// instead of trying to reproject it.
+			bool resetHistory = false;
 		};
 
 		static Renderer& Instance();

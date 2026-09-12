@@ -86,11 +86,22 @@ namespace NeuralRendering
 		// Gameplay gating state: skip logging every frame while the gate is held.
 		std::uint32_t gateLoggedFrame = 0;
 
-		// Intensity ramp state: while a gate skips the pass the level is held
-		// at 0; after the gate releases it eases back to 1 over
-		// neuralRenderingIntensityRamp seconds so the resume doesn't pop.
+		// Intensity ramp state: while a gate skips the pass (or the foveated
+		// region moves to follow the gaze) the level is held at 0; after the
+		// trigger releases it eases back to 1 over the active ramp duration
+		// so the resume doesn't pop. activeRampSeconds is whichever trigger
+		// most recently zeroed the level (gameplay gate vs gaze shift).
+		// activeRampFloor is the intensity ratio the ramp starts from: 0 for
+		// gates (full off), or minIntensity/neuralRenderingIntensity for the
+		// gaze ramp (so it eases up from the user's floor, not from zero).
 		float intensityRampLevel = 1.0f;
 		std::chrono::steady_clock::time_point lastRampTime{};
+		float activeRampSeconds = 0.0f;
+		float activeRampFloor = 0.0f;
+		// Fade-out state: when a gameplay gate triggers, the intensity eases
+		// down over neuralRenderingFadeOutSeconds before the pass is skipped.
+		bool fadeOutActive = false;
+		std::chrono::steady_clock::time_point fadeOutStartTime{};
 
 		/// True when a gameplay gate (sprint/combat) asks for the DLSSNR pass to
 		/// be skipped this frame. Reads player state through the cached globals.
@@ -404,41 +415,78 @@ namespace NeuralRendering
 		if (ShouldSkipForCharacterMask(foveated, frame)) {
 			intensityRampLevel = 0.0f;
 			lastRampTime = std::chrono::steady_clock::now();
+			activeRampSeconds = foveated.settings.neuralRenderingIntensityRamp;
+			activeRampFloor = 0.0f;
 			lastAppliedFrame = frame;
 			return true;
 		}
 
-		// Gameplay gating skip: sprint/combat gates free the GPU exactly when
-		// frames matter most. Same history-safe skip as the character gate.
-		if (ShouldSkipForGameplayGate(foveated, frame)) {
-			intensityRampLevel = 0.0f;
-			lastRampTime = std::chrono::steady_clock::now();
-			lastAppliedFrame = frame;
-			return true;
-		}
+		const auto now = std::chrono::steady_clock::now();
 
-		// Ease the intensity back in after a gate releases: 0 = snap to full
-		// intensity instantly, N seconds = linear ramp so the effect fades in
-		// instead of popping back after a sprint/combat gate.
-		{
-			const auto now = std::chrono::steady_clock::now();
-			const float rampSeconds = foveated.settings.neuralRenderingIntensityRamp;
-			if (rampSeconds > 0.0f && intensityRampLevel < 1.0f) {
-				const float dt = std::chrono::duration<float>(now - lastRampTime).count();
-				intensityRampLevel = std::min(1.0f, intensityRampLevel + dt / rampSeconds);
-			} else if (rampSeconds <= 0.0f) {
-				intensityRampLevel = 1.0f;
+		// Gameplay gate: fade the intensity out over neuralRenderingFadeOutSeconds,
+		// then skip the pass entirely. 0 = skip instantly (legacy hard cut).
+		const bool gateActive = ShouldSkipForGameplayGate(foveated, frame);
+		const float fadeOutSeconds = foveated.settings.neuralRenderingFadeOutSeconds;
+		if (gateActive) {
+			if (fadeOutSeconds <= 0.0f) {
+				intensityRampLevel = 0.0f;
+				lastRampTime = now;
+				activeRampSeconds = foveated.settings.neuralRenderingIntensityRamp;
+				activeRampFloor = 0.0f;
+				lastAppliedFrame = frame;
+				return true;
 			}
+			if (!fadeOutActive) {
+				fadeOutActive = true;
+				fadeOutStartTime = now;
+			}
+			const float elapsed = std::chrono::duration<float>(now - fadeOutStartTime).count();
+			intensityRampLevel = std::max(0.0f, 1.0f - elapsed / fadeOutSeconds);
 			lastRampTime = now;
-		}
+			if (intensityRampLevel <= 0.0f) {
+				lastAppliedFrame = frame;
+				return true;
+			}
+			// Still fading: evaluate at reduced intensity, no ease-back-in.
+			activeRampFloor = 0.0f;
+			activeRampSeconds = 0.0f;
+		} else {
+			fadeOutActive = false;
+			// Default ease-back-in after a gate releases.
+			activeRampSeconds = foveated.settings.neuralRenderingIntensityRamp;
 
-		// NR stays at full intensity every frame, including subrect-move
-		// frames: the crop motion compensation below (mvec delta added to
-		// the guides) lets the NGX temporal history survive the crop move,
-		// so there is no need to fade the effect out while the region
-		// glides. The old intensity fade (0.4 down / 0.35 up per frame)
-		// read as "NR turns off while the square moves" and is obsolete
-		// now that history survives moves.
+			// Gaze-shift ramp: when the foveated region moves to follow the gaze,
+			// ease the intensity back in over eyeTrackingGazeRampSeconds instead
+			// of snapping to full. Unlike the gates above this does NOT skip the
+			// pass — the region still evaluates, just at reduced intensity while
+			// it settles. subrectMovedThisFrame stays true for every frame of a
+			// multi-frame glide, so the level is held at the floor until the
+			// region stops, then ramps up to full. The floor is the user's min
+			// intensity ratio, so the effect eases up from there rather than 0.
+			if (foveated.subrectMovedThisFrame && foveated.settings.eyeTrackingGazeRampEnabled) {
+				intensityRampLevel = 0.0f;
+				lastRampTime = now;
+				activeRampSeconds = foveated.settings.eyeTrackingGazeRampSeconds;
+				const float full = foveated.settings.neuralRenderingIntensity;
+				const float min = foveated.settings.eyeTrackingGazeRampMinIntensity;
+				activeRampFloor = (full > 0.0f) ? std::clamp(min / full, 0.0f, 1.0f) : 0.0f;
+			}
+
+			// Ease the intensity back in after a gate releases or a gaze shift
+			// stops: 0 = snap to full intensity instantly, N seconds = linear
+			// ramp so the effect fades in instead of popping back. The active
+			// ramp duration is whichever trigger most recently zeroed the level.
+			{
+				const float rampSeconds = activeRampSeconds;
+				if (rampSeconds > 0.0f && intensityRampLevel < 1.0f) {
+					const float dt = std::chrono::duration<float>(now - lastRampTime).count();
+					intensityRampLevel = std::min(1.0f, intensityRampLevel + dt / rampSeconds);
+				} else if (rampSeconds <= 0.0f) {
+					intensityRampLevel = 1.0f;
+				}
+				lastRampTime = now;
+			}
+		}
 
 		auto* renderer = globals::game::renderer;
 		auto* context = globals::d3d::context;
@@ -525,6 +573,13 @@ namespace NeuralRendering
 		}
 
 		std::array<Renderer::StereoEyeInput, 2> inputs{};
+		// Adaptive reset threshold (CheekyFoveatedDLSS GazeResetPolicy): a crop
+		// jump larger than max(64px, 12.5% of the crop's smaller extent) has no
+		// overlap to compensate, so the NGX history is reset instead of trying
+		// to reproject it. The subrect delta is in full-eye UV units; multiply
+		// by the full-eye pixel size to get the on-screen jump in pixels.
+		const float resetThresholdPx = std::max(64.0f,
+			0.125f * static_cast<float>(std::min(FoveatedRenderImpl::Core::vrSubrectInW, FoveatedRenderImpl::Core::vrSubrectInH)));
 		for (std::uint32_t eye = 0; eye < 2; ++eye) {
 			const auto& uv = *eyeUVs[eye];
 			const std::uint32_t x = (eye ? eyeWidth : 0) + static_cast<std::uint32_t>(eyeWidth * uv.x);
@@ -533,6 +588,12 @@ namespace NeuralRendering
 			float motionScaleX = 1.0f;
 			float motionScaleY = 1.0f;
 			FoveatedRenderImpl::Bridge::ComputeMvecScale(eye, motionScaleX, motionScaleY);
+			// Large-jump detection: if the subrect moved more than the adaptive
+			// threshold this frame, compensation can't recover history (no
+			// overlap) — request a reset instead.
+			const float deltaPxX = std::abs(foveated.lastSubrectDeltaUV[eye].x) * static_cast<float>(eyeWidth);
+			const float deltaPxY = std::abs(foveated.lastSubrectDeltaUV[eye].y) * static_cast<float>(totalDesc.Height);
+			const bool largeJump = deltaPxX > resetThresholdPx || deltaPxY > resetThresholdPx;
 			inputs[eye] = {
 				.depth = FoveatedRenderImpl::Core::vrSubrectDepth[eye]->resource.get(),
 				.depthSRV = FoveatedRenderImpl::Core::vrSubrectDepth[eye]->srv.get(),
@@ -551,13 +612,15 @@ namespace NeuralRendering
 				// + currentOrigin - previousOrigin (mv points current ->
 				// previous, the crop moved by +delta, so stored vectors grow
 				// by delta). Non-zero only on move frames.
-				.cropMotionOffsetX = foveated.lastSubrectDeltaUV[eye].x,
-				.cropMotionOffsetY = -foveated.lastSubrectDeltaUV[eye].y,
+				.cropMotionOffsetX = largeJump ? 0.0f : foveated.lastSubrectDeltaUV[eye].x,
+				.cropMotionOffsetY = largeJump ? 0.0f : -foveated.lastSubrectDeltaUV[eye].y,
+				.resetHistory = largeJump,
 			};
 		}
 		const bool succeeded = Renderer::Instance().ApplyStereo(globals::d3d::device, context,
 			total.texture, inputs, FoveatedRenderImpl::Core::vrSubrectInW, FoveatedRenderImpl::Core::vrSubrectInH,
-			outWidth, outHeight, GetTuning(foveated.settings, intensityRampLevel));
+			outWidth, outHeight, GetTuning(foveated.settings,
+				activeRampFloor + (1.0f - activeRampFloor) * intensityRampLevel));
 		if (succeeded) {
 			lastAppliedFrame = frame;
 			if (!writebackLogged) {

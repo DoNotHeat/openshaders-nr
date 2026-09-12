@@ -36,6 +36,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingPreset,
 	neuralRenderingIntensity,
 	neuralRenderingIntensityRamp,
+	neuralRenderingFadeOutSeconds,
 	neuralRenderingLocalTone,
 	neuralRenderingLocalStructure,
 	neuralRenderingSkinStructure,
@@ -55,7 +56,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	eyeTrackingBiasY,
 	eyeTrackingFovDeadzonePx,
 	eyeTrackingFovTargetSmoothing,
-	eyeTrackingFovGlideFactor);
+	eyeTrackingFovGlideFactor,
+	eyeTrackingGazeRampEnabled,
+	eyeTrackingGazeRampSeconds,
+	eyeTrackingGazeRampMinIntensity);
 
 // ============================================================================
 // Lifecycle
@@ -147,6 +151,7 @@ void FoveatedRender::ClampSettings()
 	settings.neuralRenderingCharacterRange = std::clamp(settings.neuralRenderingCharacterRange, 0.0f, 16384.0f);
 	settings.neuralRenderingIntensity = std::clamp(settings.neuralRenderingIntensity, 0.0f, 2.0f);
 	settings.neuralRenderingIntensityRamp = std::clamp(settings.neuralRenderingIntensityRamp, 0.0f, 1.0f);
+	settings.neuralRenderingFadeOutSeconds = std::clamp(settings.neuralRenderingFadeOutSeconds, 0.0f, 1.0f);
 	settings.neuralRenderingLocalTone = std::clamp(settings.neuralRenderingLocalTone, 0.0f, 2.0f);
 	settings.neuralRenderingLocalStructure = std::clamp(settings.neuralRenderingLocalStructure, 0.0f, 2.0f);
 	settings.neuralRenderingSkinStructure = std::clamp(settings.neuralRenderingSkinStructure, 0.0f, 2.0f);
@@ -158,6 +163,8 @@ void FoveatedRender::ClampSettings()
 	settings.eyeTrackingFovDeadzonePx = std::clamp(settings.eyeTrackingFovDeadzonePx, 50.0f, 800.0f);
 	settings.eyeTrackingFovTargetSmoothing = std::clamp(settings.eyeTrackingFovTargetSmoothing, 0.1f, 1.0f);
 	settings.eyeTrackingFovGlideFactor = std::clamp(settings.eyeTrackingFovGlideFactor, 0.05f, 1.0f);
+	settings.eyeTrackingGazeRampSeconds = std::clamp(settings.eyeTrackingGazeRampSeconds, 0.0f, 1.0f);
+	settings.eyeTrackingGazeRampMinIntensity = std::clamp(settings.eyeTrackingGazeRampMinIntensity, 0.0f, 2.0f);
 	// Preset clamping reads from Upscaling::Settings now.
 	auto& sharedPreset = globals::features::upscaling.settings.presetDLSS;
 	sharedPreset = std::min(sharedPreset, 5u);
@@ -250,15 +257,61 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	// smooth it, publish the smoothed point for the debug overlay, and shift
 	// the high-quality subrect to follow the gaze.
 	if (!globals::game::isVR || !settings.eyeTrackingFoveationEnabled) {
+		// Clear any lingering gaze offset so GetUV() falls back to the manual
+		// currentUV (preset or user-drawn region). Without this, disabling the
+		// pipeline leaves gazeOffsetActive true and the subrect frozen at the
+		// last gaze position, ignoring presets and manual resizing.
+		subrectController.SetGazeOffset(0.0f, 0.0f, 0.0f, 0.0f);
 		subrectMovedThisFrame = false;
 		return;
 	}
 
 	auto sample = FoveatedRenderEyeTracking::TryGetEyeTrackingData();
 	if (!sample.isValid) {
+		// Gaze lost: glide the subrect back to the fixed center (offset 0)
+		// over kGazeReturnSeconds instead of snapping instantly (Cheeky-
+		// FoveatedDLSS GazeTemporalPolicy). Holds the last position for
+		// kGazeHoldSeconds first, then eases to center. This avoids a jarring
+		// teleport when the tracker briefly loses the eye.
 		eyeTrackingData.isValid = false;
+		const auto now = std::chrono::steady_clock::now();
+		if (!gazeReturnActive) {
+			gazeReturnActive = true;
+			gazeReturnStartTime = now;
+			gazeReturnStartOffset[0][0] = lastGazeOffsetUV[0];
+			gazeReturnStartOffset[0][1] = lastGazeOffsetUV[1];
+			gazeReturnStartOffset[1][0] = lastGazeOffsetRightUV[0];
+			gazeReturnStartOffset[1][1] = lastGazeOffsetRightUV[1];
+		}
+		const float elapsed = std::chrono::duration<float>(now - gazeReturnStartTime).count();
+		constexpr float kGazeHoldSeconds = 0.1f;
+		constexpr float kGazeReturnSeconds = 0.15f;
+		if (elapsed <= kGazeHoldSeconds) {
+			// Hold the last position.
+			subrectController.SetGazeOffset(lastGazeOffsetUV[0], -lastGazeOffsetUV[1],
+				lastGazeOffsetRightUV[0], -lastGazeOffsetRightUV[1]);
+			subrectMovedThisFrame = false;
+			return;
+		}
+		const float amount = std::clamp((elapsed - kGazeHoldSeconds) / kGazeReturnSeconds, 0.0f, 1.0f);
+		// Ease each eye's offset toward 0 (the fixed center).
+		for (uint eye = 0; eye < 2; ++eye) {
+			float* off = (eye == 0) ? lastGazeOffsetUV : lastGazeOffsetRightUV;
+			const float* start = gazeReturnStartOffset[eye];
+			off[0] = start[0] * (1.0f - amount);
+			off[1] = start[1] * (1.0f - amount);
+		}
+		subrectController.SetGazeOffset(lastGazeOffsetUV[0], -lastGazeOffsetUV[1],
+			lastGazeOffsetRightUV[0], -lastGazeOffsetRightUV[1]);
+		subrectMovedThisFrame = amount > 0.0f && amount < 1.0f;
+		if (amount >= 1.0f) {
+			gazeReturnActive = false;
+			subrectMovedThisFrame = false;
+		}
 		return;
 	}
+	// Valid gaze: cancel any in-progress return to center.
+	gazeReturnActive = false;
 
 	// Per-eye temporal smoothing (exponential moving average). Applied every
 	// frame unconditionally: a deadzone gate here makes the smoothed point
@@ -343,6 +396,23 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	const float eyeWidthPx = std::max(1.0f, renderSize.x * 0.5f);
 	const float eyeHeightPx = std::max(1.0f, renderSize.y);
 
+	// Gaze quantization: snap the target offset to a pixel grid so the crop
+	// moves in discrete steps instead of a continuous glide. Each sub-pixel
+	// glide step is a crop move that churns the DLSS/NR temporal history
+	// (new leading-edge pixels every frame); quantizing collapses the glide
+	// into a small set of positions, so the crop moves only every N frames
+	// and each move is a clean, compensatable step. Mirrors CheekyFoveatedDLSS's
+	// gaze_quantization_pixels. The offset is relative to the base crop, so
+	// quantizing the offset (not the absolute position) keeps the base region
+	// untouched while making every move a multiple of the quantum.
+	constexpr float kGazeQuantizationPx = 8.0f;
+	auto quantizeOffset = [&](float* off) {
+		off[0] = std::round(off[0] * eyeWidthPx / kGazeQuantizationPx) * kGazeQuantizationPx / eyeWidthPx;
+		off[1] = std::round(off[1] * eyeHeightPx / kGazeQuantizationPx) * kGazeQuantizationPx / eyeHeightPx;
+	};
+	quantizeOffset(offsetL);
+	quantizeOffset(offsetR);
+
 	// Movement threshold in pixels — user-tunable. Must be comfortably above
 	// tracker noise so a still gaze never trips it; large enough that the
 	// subrect moves only on deliberate gaze shifts. Evaluated per eye: under
@@ -424,9 +494,21 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 			glideToward(lastGazeOffsetUV, offsetL);
 		if (anyMoved)
 			glideToward(lastGazeOffsetRightUV, offsetR);
+		// Quantize the applied offset to the pixel grid so the crop moves in
+		// discrete 8px steps. The continuous glide toward the target is snapped
+		// to the grid here, so the crop holds still until the glide accumulates
+		// a full quantum, then jumps one clean step. This collapses the
+		// per-frame sub-pixel churn that otherwise keeps DLSS/NR history
+		// rebuilding on every glide frame. lastGazeOffsetUV is stored quantized
+		// so GetGazeOffsetNDC (pinhole reprojection) and the mvec compensation
+		// delta both see the position actually applied to the subrect.
+		lastGazeOffsetUV[0] = std::round(lastGazeOffsetUV[0] * eyeWidthPx / kGazeQuantizationPx) * kGazeQuantizationPx / eyeWidthPx;
+		lastGazeOffsetUV[1] = std::round(lastGazeOffsetUV[1] * eyeHeightPx / kGazeQuantizationPx) * kGazeQuantizationPx / eyeHeightPx;
+		lastGazeOffsetRightUV[0] = std::round(lastGazeOffsetRightUV[0] * eyeWidthPx / kGazeQuantizationPx) * kGazeQuantizationPx / eyeWidthPx;
+		lastGazeOffsetRightUV[1] = std::round(lastGazeOffsetRightUV[1] * eyeHeightPx / kGazeQuantizationPx) * kGazeQuantizationPx / eyeHeightPx;
 		subrectController.SetGazeOffset(lastGazeOffsetUV[0], -lastGazeOffsetUV[1],
 			lastGazeOffsetRightUV[0], -lastGazeOffsetRightUV[1]);
-		// Report the move only while the glide step is meaningful: NR pauses on
+		// Report the move only while the applied step is meaningful: NR pauses on
 		// this flag, and holding the pause through the glide's tail (sub-pixel
 		// steps) would keep NR off for most of a second per recenter.
 		const float stepPx = std::max(
@@ -633,12 +715,19 @@ void FoveatedRender::DrawSettings()
 			}
 			bool custom = false;
 			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_intensity"), "Intensity"), &settings.neuralRenderingIntensity, 0.0f, 2.0f, "%.2f");
-			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_intensity_ramp"), "Intensity Ramp"), &settings.neuralRenderingIntensityRamp, 0.0f, 1.0f, "%.1f s");
+			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_intensity_ramp"), "Fade In Time"), &settings.neuralRenderingIntensityRamp, 0.0f, 1.0f, "%.1f s");
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				ImGui::Text("%s", T(TKEY("neural_rendering_intensity_ramp_tooltip"),
 					"Seconds to ease the intensity in after a gameplay gate (sprint/combat) or the character gate\n"
 					"stops skipping the pass. 0 = snap to full intensity instantly (the effect pops back);\n"
 					"1 = fade in over one second, so the resume doesn't read as a jarring switch."));
+			}
+			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_fade_out"), "Fade Out Time"), &settings.neuralRenderingFadeOutSeconds, 0.0f, 1.0f, "%.1f s");
+			if (auto _tt = Util::HoverTooltipWrapper()) {
+				ImGui::Text("%s", T(TKEY("neural_rendering_fade_out_tooltip"),
+					"Seconds to ease the intensity out after a gameplay gate (sprint/combat) triggers,\n"
+					"before the pass is skipped entirely. 0 = skip instantly (the effect cuts off);\n"
+					"1 = fade out over one second, so the disable doesn't read as a jarring switch."));
 			}
 			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_local_tone"), "Local Tone"), &settings.neuralRenderingLocalTone, 0.0f, 2.0f, "%.2f");
 			custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_local_structure"), "Local Structure"), &settings.neuralRenderingLocalStructure, 0.0f, 2.0f, "%.2f");
@@ -924,6 +1013,28 @@ void FoveatedRender::DrawSettings()
 			}
 			ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_fov_glide"), "FOV Glide Speed"),
 				&settings.eyeTrackingFovGlideFactor, 0.05f, 1.0f, "%.2f");
+
+			// Gaze-shift intensity ramp: ease the NR intensity back in after the
+			// region moves to follow the gaze, instead of snapping to full.
+			bool gazeRampBool = settings.eyeTrackingGazeRampEnabled;
+			if (ImGui::Checkbox(T(TKEY("foveated_eye_tracking_gaze_ramp_enable"), "Gaze Shift Intensity Ramp"), &gazeRampBool))
+				settings.eyeTrackingGazeRampEnabled = gazeRampBool;
+			if (settings.eyeTrackingGazeRampEnabled) {
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("%s", "Seconds to ease the NR intensity back in after the foveated\n"
+						"region moves to follow your gaze. 0 = snap to full intensity\n"
+						"instantly; 1 = fade in over one second.");
+				}
+				ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_gaze_ramp_seconds"), "Gaze Shift Ramp Time"),
+					&settings.eyeTrackingGazeRampSeconds, 0.0f, 1.0f, "%.1f s");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("%s", "Intensity the NR effect starts from after a gaze shift, before\n"
+						"ramping up to the general NR Intensity above. 0 = fully off;\n"
+						"1.5 with a general Intensity of 1.5 = no visible ramp.");
+				}
+				ImGui::SliderFloat(T(TKEY("foveated_eye_tracking_gaze_ramp_min_intensity"), "Gaze Shift Min Intensity"),
+					&settings.eyeTrackingGazeRampMinIntensity, 0.0f, 2.0f, "%.2f");
+			}
 
 			const char* overlayModes[] = { "Off", "Crosshair", "Crosshair + Mask" };
 			int overlay = static_cast<int>(settings.eyeTrackingDebugOverlay);

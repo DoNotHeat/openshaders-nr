@@ -102,6 +102,11 @@ struct FoveatedRender
 		// effect pops back); 1 = fade in over one second, so the resume after
 		// a sprint/combat gate doesn't read as a jarring switch.
 		float neuralRenderingIntensityRamp = 0.0f;  // [0, 1] seconds, 0.1 steps
+		// Seconds to ease the intensity out after a gameplay gate (sprint/combat)
+		// triggers, before the pass is skipped entirely. 0 = skip instantly (the
+		// effect cuts off); 1 = fade out over one second, so the disable doesn't
+		// read as a jarring switch.
+		float neuralRenderingFadeOutSeconds = 0.0f;  // [0, 1] seconds, 0.1 steps
 		float neuralRenderingLocalTone = 0.75f;
 		float neuralRenderingLocalStructure = 0.9f;
 		float neuralRenderingSkinStructure = 0.9f;
@@ -159,6 +164,14 @@ struct FoveatedRender
 		// Pinhole reprojection lets DLSS follow fast crops, so the glide can
 		// be short; long glides made the region arrive after the eye focused.
 		float eyeTrackingFovGlideFactor = 0.2f;  // (0, 1]
+		// Gaze-shift intensity ramp: when the foveated region moves to follow
+		// the gaze, ease the NR intensity back in from eyeTrackingGazeRampMinIntensity
+		// up to the general neuralRenderingIntensity over eyeTrackingGazeRampSeconds,
+		// so the effect doesn't pop back at full strength after a gaze shift.
+		// Disabled by default (snap to full intensity instantly).
+		bool eyeTrackingGazeRampEnabled = false;
+		float eyeTrackingGazeRampSeconds = 0.5f;  // [0, 1] seconds, 0.1 steps
+		float eyeTrackingGazeRampMinIntensity = 0.5f;  // [0, 2]
 	};
 
 	inline static constexpr Util::Settings::RestartTable<Settings, 1> kRestartFields{ {
@@ -203,6 +216,15 @@ struct FoveatedRender
 	// glide that stops on the deadzone re-arm and re-triggers later reads as
 	// two separate region redraws — the latch keeps it moving until arrival.
 	bool gazeGlideActive = false;
+
+	// Gaze-loss return (CheekyFoveatedDLSS GazeTemporalPolicy): when the gaze
+	// sample is lost, the subrect glides back to the fixed center (offset 0)
+	// over kGazeReturnSeconds instead of snapping instantly. Holds the last
+	// position for kGazeHoldSeconds first, then eases to center. State tracks
+	// the return start offset and time so the easing is smooth and resumable.
+	bool gazeReturnActive = false;
+	std::chrono::steady_clock::time_point gazeReturnStartTime{};
+	float gazeReturnStartOffset[2][2] = { { 0.0f, 0.0f }, { 0.0f, 0.0f } };
 
 	// Per-eye subrect movement delta of the LAST applied move (UV units of
 	// the per-eye region, gaze UV convention: y up). Consumers that keep
