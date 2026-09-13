@@ -11,7 +11,9 @@ cbuffer TemporalSmoothCB : register(b0)
 	uint TexWidth;     // SBS width (render-res)
 	uint TexHeight;    // SBS height (render-res)
 	float BlendAlpha;  // Current-frame weight (0.05 = very smooth, 0.5 = less smooth)
-	uint _pad;
+	uint RegionValid;  // 1 = SubRectX/Y/W/H carry the current subrect region
+	float4 SubRectL;   // Left eye subrect in per-eye UV (x, y, w, h)
+	float4 SubRectR;   // Right eye subrect in per-eye UV (x, y, w, h)
 };
 
 Texture2D<float4> CurrentTex : register(t0);   // vrRenderSBS snapshot (current frame)
@@ -26,6 +28,28 @@ RWTexture2D<float4> OutputTex : register(u0);  // New history (ping-pong write)
 
 	uint2 pos = tid.xy;
 	float4 current = CurrentTex.Load(int3(pos, 0));
+
+	// ── Subrect bypass ──
+	// The snapshot this pass reads is a copy of kMAIN, which already holds last
+	// frame's composite: the DLSS square at its previous position. Accumulating
+	// that into history lets a moved square's old position bleed through as a
+	// sharp ghost in the blurred periphery. Inside the CURRENT subrect region
+	// the stretched background is fully overwritten by the blend pass anyway,
+	// so history there is useless — take the current frame directly. History
+	// accumulation only matters for the true periphery.
+	if (RegionValid != 0) {
+		uint halfWpx = TexWidth / 2;
+		uint eyeMinPx = (pos.x < halfWpx) ? 0 : halfWpx;
+		float eyeW = (float)(halfWpx);
+		float2 eyeUV = (float2(pos.x - eyeMinPx, pos.y) + 0.5) / float2(eyeW, (float)TexHeight);
+		float4 region = (pos.x < halfWpx) ? SubRectL : SubRectR;
+		bool inside = eyeUV.x >= region.x && eyeUV.x <= region.x + region.z &&
+			eyeUV.y >= region.y && eyeUV.y <= region.y + region.w;
+		if (inside) {
+			OutputTex[pos] = current;
+			return;
+		}
+	}
 
 	// Motion vector is per-eye UV delta (current → previous), range ≈ ±small.
 	// In SBS layout the x axis spans two eyes, so x-component must be halved.

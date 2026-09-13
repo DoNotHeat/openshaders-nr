@@ -541,7 +541,7 @@ namespace FoveatedRenderImpl::Ops
 			Util::SetResourceName(Core::vrTemporalSmoothCS.get(), "FoveatedRender::TemporalSmoothCS");
 
 			D3D11_BUFFER_DESC cbDesc = {};
-			cbDesc.ByteWidth = 16;  // 2 uint + 1 float + 1 uint pad
+			cbDesc.ByteWidth = 48;  // 2 uint + 2 float + 2 float4 (subrect regions)
 			cbDesc.Usage = D3D11_USAGE_DYNAMIC;
 			cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 			cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -573,12 +573,21 @@ namespace FoveatedRenderImpl::Ops
 				uint32_t w;
 				uint32_t h;
 				float alpha;
-				uint32_t pad;
+				uint32_t regionValid;
+				float subRectL[4];
+				float subRectR[4];
 			} cb;
 			cb.w = renderW;
 			cb.h = renderH;
 			cb.alpha = globals::features::upscaling.foveatedRender.settings.peripheryTemporalAlpha;
-			cb.pad = 0;
+			// Current subrect region per eye (per-eye UV). The shader bypasses
+			// history inside it — the blend pass overwrites that area anyway.
+			auto& foveated = globals::features::upscaling.foveatedRender;
+			const auto& lUV = foveated.subrectController.GetUV();
+			const auto& rUV = foveated.subrectController.GetRightEyeUV();
+			cb.regionValid = 1;
+			cb.subRectL[0] = lUV.x; cb.subRectL[1] = lUV.y; cb.subRectL[2] = lUV.w; cb.subRectL[3] = lUV.h;
+			cb.subRectR[0] = rUV.x; cb.subRectR[1] = rUV.y; cb.subRectR[2] = rUV.w; cb.subRectR[3] = rUV.h;
 			std::memcpy(mapped.pData, &cb, sizeof(cb));
 			context->Unmap(Core::vrTemporalSmoothCB.get(), 0);
 		}
@@ -622,6 +631,14 @@ namespace FoveatedRenderImpl::Ops
 			// null SRV bound at t2, reading undefined data.
 			if (!Core::vrMvecSRV)
 				return nullptr;
+			// Snapshot feedback loop: vrRenderSBS is a copy of kMAIN, which already
+			// holds LAST frame's composite (DLSS square at its previous position).
+			// While the subrect is static that loop converges; while it moves, the
+			// old square position bleeds into the temporal history and decays as a
+			// sharp ghost in the blurred periphery. Re-seed the history from the
+			// fresh snapshot on move frames so the ghost never accumulates.
+			if (globals::features::upscaling.foveatedRender.subrectMovedThisFrame)
+				Core::vrTemporalHistoryValid = false;
 			return TemporalSmoothSBS(p.renderW, p.renderH);
 		}
 		return nullptr;

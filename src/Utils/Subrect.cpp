@@ -155,8 +155,10 @@ namespace Util::Subrect
 			SyncRightUV();
 		}
 		if (stereoEnabled) {
-			stereoOffsetX = a_json.value("StereoOffsetX", 0.0f);
-			stereoOffsetY = a_json.value("StereoOffsetY", 0.0f);
+			stereoOffsetLeftX = a_json.value("StereoOffsetLeftX", a_json.value("StereoOffsetX", 0.0f));
+			stereoOffsetLeftY = a_json.value("StereoOffsetLeftY", a_json.value("StereoOffsetY", 0.0f));
+			stereoOffsetRightX = a_json.value("StereoOffsetRightX", a_json.value("StereoOffsetX", 0.0f));
+			stereoOffsetRightY = a_json.value("StereoOffsetRightY", a_json.value("StereoOffsetY", 0.0f));
 			ApplyStereoOffset();
 		}
 
@@ -188,8 +190,10 @@ namespace Util::Subrect
 			a_json["CropRightY"] = currentRightUV.y;
 			a_json["CropRightW"] = currentRightUV.w;
 			a_json["CropRightH"] = currentRightUV.h;
-			a_json["StereoOffsetX"] = stereoOffsetX;
-			a_json["StereoOffsetY"] = stereoOffsetY;
+			a_json["StereoOffsetLeftX"] = stereoOffsetLeftX;
+			a_json["StereoOffsetLeftY"] = stereoOffsetLeftY;
+			a_json["StereoOffsetRightX"] = stereoOffsetRightX;
+			a_json["StereoOffsetRightY"] = stereoOffsetRightY;
 		} else {
 			// Caller may pass a JSON object with prior stereo keys (e.g. a
 			// host that re-saves into the same in-memory config). Drop them
@@ -463,8 +467,10 @@ namespace Util::Subrect
 
 		// Shift each eye's region center by ITS OWN gaze offset, preserving
 		// size. UV y is down while gaze NDC y is up, so the caller passes
-		// y-inverted offsets; here we just apply them directly.
-		gazeShiftedUV = currentUV;
+		// y-inverted offsets; here we just apply them directly. The base for
+		// each eye already carries the manual stereo offset (offsetLeftUV /
+		// offsetRightUV), so gaze and manual alignment compose.
+		gazeShiftedUV = stereoEnabled ? offsetLeftUV : currentUV;
 		gazeShiftedUV.x = std::clamp(gazeShiftedUV.x + offsetX, 0.0f, 1.0f - gazeShiftedUV.w);
 		gazeShiftedUV.y = std::clamp(gazeShiftedUV.y + offsetY, 0.0f, 1.0f - gazeShiftedUV.h);
 
@@ -484,18 +490,23 @@ namespace Util::Subrect
 		ApplyStereoOffset();
 	}
 
-	void Controller::SetStereoOffset(float offsetX, float offsetY)
+	void Controller::SetStereoOffset(float leftX, float leftY, float rightX, float rightY)
 	{
-		stereoOffsetX = offsetX;
-		stereoOffsetY = offsetY;
+		stereoOffsetLeftX = leftX;
+		stereoOffsetLeftY = leftY;
+		stereoOffsetRightX = rightX;
+		stereoOffsetRightY = rightY;
 		ApplyStereoOffset();
 	}
 
 	void Controller::ApplyStereoOffset()
 	{
+		offsetLeftUV = currentUV;
+		offsetLeftUV.x = std::clamp(offsetLeftUV.x + stereoOffsetLeftX, 0.0f, 1.0f - offsetLeftUV.w);
+		offsetLeftUV.y = std::clamp(offsetLeftUV.y + stereoOffsetLeftY, 0.0f, 1.0f - offsetLeftUV.h);
 		offsetRightUV = currentRightUV;
-		offsetRightUV.x = std::clamp(offsetRightUV.x + stereoOffsetX, 0.0f, 1.0f - offsetRightUV.w);
-		offsetRightUV.y = std::clamp(offsetRightUV.y + stereoOffsetY, 0.0f, 1.0f - offsetRightUV.h);
+		offsetRightUV.x = std::clamp(offsetRightUV.x + stereoOffsetRightX, 0.0f, 1.0f - offsetRightUV.w);
+		offsetRightUV.y = std::clamp(offsetRightUV.y + stereoOffsetRightY, 0.0f, 1.0f - offsetRightUV.h);
 	}
 
 	bool Controller::ApplyPresetByName(const std::string& name)

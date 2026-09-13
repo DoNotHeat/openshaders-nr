@@ -154,25 +154,31 @@ namespace Util::Subrect
 		StereoPixelRegions GetStereoPixelRegions(uint32_t fullWidth, uint32_t fullHeight) const;
 
 		/** @brief Get the current crop region in UV coordinates. */
-		const UVRegion& GetUV() const { return gazeOffsetActive ? gazeShiftedUV : currentUV; }
+		const UVRegion& GetUV() const
+		{
+			return gazeOffsetActive ? gazeShiftedUV : (stereoEnabled ? offsetLeftUV : currentUV);
+		}
 		const UVRegion& GetRightEyeUV() const
 		{
 			return gazeOffsetActive ? gazeShiftedRightUV : (stereoEnabled ? offsetRightUV : currentUV);
 		}
 
 		/**
-		 * @brief Persistent manual offset of the right-eye region relative to its
-		 * auto-mirrored position, in UV units of the per-eye region.
+		 * @brief Persistent manual offsets of each eye's region relative to its
+		 * base position, in UV units of the per-eye region.
 		 *
-		 * HMD lens geometry and per-eye projection asymmetry mean the mirrored
-		 * square can land slightly off the content the other eye's square covers,
-		 * reading as binocular doubling. This offset nudges the right square back
-		 * into fusion without touching the left eye or the base crop. Applied on
-		 * top of (i.e. composed with) any active gaze offset. Persists in settings.
+		 * The right eye auto-mirrors the left around x=0.5; HMD lens geometry and
+		 * per-eye projection asymmetry can leave either square slightly off the
+		 * content the other covers, reading as binocular doubling. These offsets
+		 * nudge each square independently (and both together) back into fusion
+		 * without touching the base crop. Applied on top of (i.e. composed with)
+		 * any active gaze offset. Persist in settings.
 		 */
-		void SetStereoOffset(float offsetX, float offsetY);
-		float GetStereoOffsetX() const { return stereoOffsetX; }
-		float GetStereoOffsetY() const { return stereoOffsetY; }
+		void SetStereoOffset(float leftX, float leftY, float rightX, float rightY);
+		float GetStereoOffsetLeftX() const { return stereoOffsetLeftX; }
+		float GetStereoOffsetLeftY() const { return stereoOffsetLeftY; }
+		float GetStereoOffsetRightX() const { return stereoOffsetRightX; }
+		float GetStereoOffsetRightY() const { return stereoOffsetRightY; }
 
 		/**
 		 * @brief Set per-eye gaze-following offsets applied on top of the base crop.
@@ -234,12 +240,15 @@ namespace Util::Subrect
 		UVRegion currentUV{};
 		UVRegion currentRightUV{};
 		// currentRightUV + stereoOffset, kept in sync by ClampCurrentUV /
-		// SetStereoOffset. GetRightEyeUV hands this out so callers never see a
-		// stale offset after a crop edit.
+		// SetStereoOffset. GetUV/GetRightEyeUV hand these out so callers never
+		// see a stale offset after a crop edit.
+		UVRegion offsetLeftUV{};
 		UVRegion offsetRightUV{};
-		// Manual binocular alignment (see SetStereoOffset). Persisted.
-		float stereoOffsetX = 0.0f;
-		float stereoOffsetY = 0.0f;
+		// Manual binocular alignment per eye (see SetStereoOffset). Persisted.
+		float stereoOffsetLeftX = 0.0f;
+		float stereoOffsetLeftY = 0.0f;
+		float stereoOffsetRightX = 0.0f;
+		float stereoOffsetRightY = 0.0f;
 		bool stereoEnabled = false;
 		// Gaze-following offset applied on top of the base crop (see
 		// SetGazeOffset). Kept separate so it never accumulates or persists.

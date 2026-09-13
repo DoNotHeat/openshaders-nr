@@ -986,19 +986,24 @@ void FoveatedRender::DrawSettings()
 		ImGui::Text("%s", T(TKEY("foveated_binocular_header"), "Binocular Alignment"));
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("%s", T(TKEY("foveated_binocular_tooltip"),
-				"Shifts the right-eye region relative to its mirrored position.\n"
+				"Shifts each eye's region relative to its base position.\n"
 				"If the upscaled square appears doubled in the headset (left and\n"
 				"right squares not overlapping the same content), adjust until\n"
 				"the two edges fuse into one. Persists in settings."));
 		}
-		float offsetX = subrectController.GetStereoOffsetX();
-		float offsetY = subrectController.GetStereoOffsetY();
-		if (ImGui::SliderFloat2(T(TKEY("foveated_binocular_offset"), "Right Eye Offset (X, Y)"), &offsetX, -0.2f, 0.2f, "%.4f")) {
-			subrectController.SetStereoOffset(offsetX, offsetY);
+		// Contiguous float2 arrays: SliderFloat2 reads two consecutive floats,
+		// so separate locals would be UB — the pairs must be real arrays.
+		float offsetL[2] = { subrectController.GetStereoOffsetLeftX(), subrectController.GetStereoOffsetLeftY() };
+		float offsetR[2] = { subrectController.GetStereoOffsetRightX(), subrectController.GetStereoOffsetRightY() };
+		bool changed = false;
+		changed |= ImGui::SliderFloat2(T(TKEY("foveated_binocular_offset_left"), "Left Eye Offset (X, Y)"), offsetL, -0.2f, 0.2f, "%.4f");
+		changed |= ImGui::SliderFloat2(T(TKEY("foveated_binocular_offset_right"), "Right Eye Offset (X, Y)"), offsetR, -0.2f, 0.2f, "%.4f");
+		if (changed) {
+			subrectController.SetStereoOffset(offsetL[0], offsetL[1], offsetR[0], offsetR[1]);
 		}
 		ImGui::SameLine();
 		if (ImGui::Button(T(TKEY("foveated_binocular_reset"), "Reset"))) {
-			subrectController.SetStereoOffset(0.0f, 0.0f);
+			subrectController.SetStereoOffset(0.0f, 0.0f, 0.0f, 0.0f);
 		}
 
 		// ── Eye Tracking (skeleton: mock source, debug overlay only) ──
