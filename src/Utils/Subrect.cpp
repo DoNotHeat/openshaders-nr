@@ -154,6 +154,11 @@ namespace Util::Subrect
 		if (stereoEnabled && hasExplicitLeft && !hasExplicitRight) {
 			SyncRightUV();
 		}
+		if (stereoEnabled) {
+			stereoOffsetX = a_json.value("StereoOffsetX", 0.0f);
+			stereoOffsetY = a_json.value("StereoOffsetY", 0.0f);
+			ApplyStereoOffset();
+		}
 
 		if (a_json.contains("SelectedPresetIndex")) {
 			selectedPresetIndex = a_json["SelectedPresetIndex"];
@@ -183,6 +188,8 @@ namespace Util::Subrect
 			a_json["CropRightY"] = currentRightUV.y;
 			a_json["CropRightW"] = currentRightUV.w;
 			a_json["CropRightH"] = currentRightUV.h;
+			a_json["StereoOffsetX"] = stereoOffsetX;
+			a_json["StereoOffsetY"] = stereoOffsetY;
 		} else {
 			// Caller may pass a JSON object with prior stereo keys (e.g. a
 			// host that re-saves into the same in-memory config). Drop them
@@ -465,7 +472,7 @@ namespace Util::Subrect
 		// tracker's per-eye centers include convergence disparity, so a shared
 		// offset would center only one eye's square on the gazed object and the
 		// squares' edges would stop fusing (two visible squares).
-		gazeShiftedRightUV = stereoEnabled ? currentRightUV : currentUV;
+		gazeShiftedRightUV = stereoEnabled ? offsetRightUV : currentUV;
 		gazeShiftedRightUV.x = std::clamp(gazeShiftedRightUV.x + rightOffsetX, 0.0f, 1.0f - gazeShiftedRightUV.w);
 		gazeShiftedRightUV.y = std::clamp(gazeShiftedRightUV.y + rightOffsetY, 0.0f, 1.0f - gazeShiftedRightUV.h);
 	}
@@ -474,6 +481,21 @@ namespace Util::Subrect
 	{
 		currentUV = ClampUV(currentUV);
 		currentRightUV = ClampUV(currentRightUV);
+		ApplyStereoOffset();
+	}
+
+	void Controller::SetStereoOffset(float offsetX, float offsetY)
+	{
+		stereoOffsetX = offsetX;
+		stereoOffsetY = offsetY;
+		ApplyStereoOffset();
+	}
+
+	void Controller::ApplyStereoOffset()
+	{
+		offsetRightUV = currentRightUV;
+		offsetRightUV.x = std::clamp(offsetRightUV.x + stereoOffsetX, 0.0f, 1.0f - offsetRightUV.w);
+		offsetRightUV.y = std::clamp(offsetRightUV.y + stereoOffsetY, 0.0f, 1.0f - offsetRightUV.h);
 	}
 
 	bool Controller::ApplyPresetByName(const std::string& name)

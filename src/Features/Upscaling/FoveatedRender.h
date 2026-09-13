@@ -41,9 +41,10 @@ struct FoveatedRender
 	// Subrect blend mode when writing DLSS output back over stretched background
 	enum class SubrectBlendMode : uint
 	{
-		kHardCopy = 0,  // CopySubresourceRegion (no blending — sharp edge)
-		kFeather = 1,   // smoothstep alpha ramp over N pixels
-		kDither = 2,    // Blue-noise binary threshold in feather band
+		kHardCopy = 0,     // CopySubresourceRegion (no blending — sharp edge)
+		kFeather = 1,      // smoothstep alpha ramp over N pixels (inside)
+		kDither = 2,       // Blue-noise binary threshold in feather band
+		kOuterFeather = 3, // Subrect full DLSS to its edge; band OUTSIDE fades to background
 	};
 
 	// Periphery AA algorithm applied after background stretch
@@ -90,6 +91,9 @@ struct FoveatedRender
 		uint subrectBlendMode = static_cast<uint>(SubrectBlendMode::kHardCopy);
 		float subrectFeatherWidth = 64.0f;
 		float subrectDitherStrength = 1.0f;
+		// Outer feather (kOuterFeather): band width OUTSIDE the subrect that
+		// fades from the clamped DLSS edge color to the stretched background.
+		float subrectOuterFeatherWidth = 32.0f;
 		// 0 = rectangular region, 1 = elliptical; superellipse morph of the
 		// feather boundary (CheekyFoveatedDLSS Roundness). Only affects the
 		// blend modes that read the boundary shape (Feather/Dither).
@@ -317,7 +321,7 @@ struct FoveatedRender
 	DlssMode GetDlssMode() const;
 	StretchMode GetStretchMode() const { return (StretchMode)std::min(settings.stretchMode, 2u); }
 	PeripheryAAMode GetPeripheryAAMode() const { return static_cast<PeripheryAAMode>(std::min(settings.peripheryAAMode, 1u)); }
-	SubrectBlendMode GetSubrectBlendMode() const { return static_cast<SubrectBlendMode>(std::min(settings.subrectBlendMode, 2u)); }
+	SubrectBlendMode GetSubrectBlendMode() const { return static_cast<SubrectBlendMode>(std::min(settings.subrectBlendMode, 3u)); }
 
 	// Active getters: clamp + route shared fields through Upscaling::Settings.
 	uint GetActiveQualityMode() const;

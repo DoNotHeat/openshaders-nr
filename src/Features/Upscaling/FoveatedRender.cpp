@@ -31,6 +31,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	subrectBlendMode,
 	subrectFeatherWidth,
 	subrectDitherStrength,
+	subrectOuterFeatherWidth,
 	subrectRoundness,
 	neuralRenderingEnabled,
 	neuralRenderingPreset,
@@ -141,11 +142,12 @@ void FoveatedRender::ClampSettings()
 	settings.stretchMode = std::min(settings.stretchMode, 2u);
 	settings.debugVisualize = std::min(settings.debugVisualize, 1u);
 	settings.peripheryAAMode = std::min(settings.peripheryAAMode, 1u);
-	settings.subrectBlendMode = std::min(settings.subrectBlendMode, 2u);
+	settings.subrectBlendMode = std::min(settings.subrectBlendMode, 3u);
 	settings.peripheryBlurRadius = std::clamp(settings.peripheryBlurRadius, 0.5f, 4.0f);
 	settings.peripheryTemporalAlpha = std::clamp(settings.peripheryTemporalAlpha, 0.05f, 0.5f);
 	settings.subrectFeatherWidth = std::clamp(settings.subrectFeatherWidth, 2.0f, 128.0f);
 	settings.subrectDitherStrength = std::clamp(settings.subrectDitherStrength, 0.0f, 2.0f);
+	settings.subrectOuterFeatherWidth = std::clamp(settings.subrectOuterFeatherWidth, 2.0f, 128.0f);
 	settings.subrectRoundness = std::clamp(settings.subrectRoundness, 0.0f, 1.0f);
 	settings.neuralRenderingPreset = std::min(settings.neuralRenderingPreset, 4u);
 	settings.neuralRenderingCharacterRange = std::clamp(settings.neuralRenderingCharacterRange, 0.0f, 16384.0f);
@@ -673,6 +675,8 @@ const char* FoveatedRender::SubrectBlendModeName(SubrectBlendMode mode)
 		return T(TKEY("foveated_blend_feather"), "Feather");
 	case SubrectBlendMode::kDither:
 		return T(TKEY("foveated_blend_dither"), "Dither");
+	case SubrectBlendMode::kOuterFeather:
+		return T(TKEY("foveated_blend_outer_feather"), "Outer Feather");
 	default:
 		return T(TKEY("foveated_blend_hard_copy"), "Hard Copy");
 	}
@@ -904,7 +908,7 @@ void FoveatedRender::DrawSettings()
 			}
 		}
 
-		ImGui::SliderInt(T(TKEY("foveated_edge_blend_label"), "Edge Blend"), reinterpret_cast<int*>(&settings.subrectBlendMode), 0, 2, SubrectBlendModeName((SubrectBlendMode)std::min(settings.subrectBlendMode, 2u)));
+		ImGui::SliderInt(T(TKEY("foveated_edge_blend_label"), "Edge Blend"), reinterpret_cast<int*>(&settings.subrectBlendMode), 0, 3, SubrectBlendModeName((SubrectBlendMode)std::min(settings.subrectBlendMode, 3u)));
 		switch (GetSubrectBlendMode()) {
 		case SubrectBlendMode::kHardCopy:
 			ImGui::TextWrapped(T(TKEY("foveated_blend_hard_copy_desc"), "Sharp seam at the subrect boundary. Lowest cost."));
@@ -924,6 +928,12 @@ void FoveatedRender::DrawSettings()
 			ImGui::TextWrapped(T(TKEY("foveated_blend_dither_desc"), "Noise-dithered fade — more natural-looking than feather at large subrects."));
 			ImGui::SliderFloat(T(TKEY("foveated_band_width"), "Band Width"), &settings.subrectFeatherWidth, 2.0f, 128.0f, "%.0f px");
 			ImGui::SliderFloat(T(TKEY("foveated_noise_amount"), "Noise Amount"), &settings.subrectDitherStrength, 0.0f, 2.0f, "%.2f");
+			ImGui::SliderFloat(T(TKEY("foveated_roundness"), "Roundness"), &settings.subrectRoundness, 0.0f, 1.0f, "%.2f");
+			break;
+		case SubrectBlendMode::kOuterFeather:
+			ImGui::TextWrapped(T(TKEY("foveated_blend_outer_feather_desc"),
+				"Keeps the region fully sharp up to its edge and fades OUTWARD into the stretched background. No sharpness is lost inside the region."));
+			ImGui::SliderFloat(T(TKEY("foveated_outer_feather_width"), "Outer Band"), &settings.subrectOuterFeatherWidth, 2.0f, 128.0f, "%.0f px");
 			ImGui::SliderFloat(T(TKEY("foveated_roundness"), "Roundness"), &settings.subrectRoundness, 0.0f, 1.0f, "%.2f");
 			break;
 		}
@@ -965,6 +975,31 @@ void FoveatedRender::DrawSettings()
 
 		if (subrectController.IsDragging())
 			lastDragTime = std::chrono::steady_clock::now();
+
+		// ── Binocular alignment ──
+		// The right-eye square is auto-mirrored from the left around x=0.5.
+		// HMD lens/projection asymmetry can leave the two squares covering
+		// slightly different world content, which reads as binocular doubling
+		// of the DLSS region boundary. This offset nudges the right square
+		// back into fusion without touching the left eye.
+		ImGui::Separator();
+		ImGui::Text("%s", T(TKEY("foveated_binocular_header"), "Binocular Alignment"));
+		if (auto _tt = Util::HoverTooltipWrapper()) {
+			ImGui::Text("%s", T(TKEY("foveated_binocular_tooltip"),
+				"Shifts the right-eye region relative to its mirrored position.\n"
+				"If the upscaled square appears doubled in the headset (left and\n"
+				"right squares not overlapping the same content), adjust until\n"
+				"the two edges fuse into one. Persists in settings."));
+		}
+		float offsetX = subrectController.GetStereoOffsetX();
+		float offsetY = subrectController.GetStereoOffsetY();
+		if (ImGui::SliderFloat2(T(TKEY("foveated_binocular_offset"), "Right Eye Offset (X, Y)"), &offsetX, -0.2f, 0.2f, "%.4f")) {
+			subrectController.SetStereoOffset(offsetX, offsetY);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button(T(TKEY("foveated_binocular_reset"), "Reset"))) {
+			subrectController.SetStereoOffset(0.0f, 0.0f);
+		}
 
 		// ── Eye Tracking (skeleton: mock source, debug overlay only) ──
 		ImGui::Separator();

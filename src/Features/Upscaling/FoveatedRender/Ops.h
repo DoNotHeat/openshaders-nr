@@ -71,10 +71,12 @@ namespace FoveatedRenderImpl::Ops
 	void ClearHMDMaskOnSnapshot(const VRDlssParams& p);
 
 	// Blend a DLSS subrect output onto the destination at (offsetX, offsetY).
-	// kHardCopy fast-paths to CopySubresourceRegion; Feather/Dither dispatch
-	// SubrectBlendCS into dstUAV.
+	// kHardCopy fast-paths to CopySubresourceRegion; Feather/Dither/OuterFeather
+	// dispatch SubrectBlendCS into dstUAV. eyeBaseX/eyeWidthOut/eyeHeightOut
+	// bound the outer-feather band to the eye's own region of the SBS target.
 	void BlendSubrectToOutput(ID3D11Resource* dlssSrc, ID3D11Resource* dst, ID3D11UnorderedAccessView* dstUAV,
-		uint32_t dstOffsetX, uint32_t dstOffsetY, uint32_t subWidth, uint32_t subHeight, uint32_t srcOffsetX = 0);
+		uint32_t dstOffsetX, uint32_t dstOffsetY, uint32_t subWidth, uint32_t subHeight, uint32_t srcOffsetX = 0,
+		uint32_t eyeBaseX = 0, uint32_t eyeWidthOut = 0, uint32_t eyeHeightOut = 0);
 
 	// Rewrite the cropped mvec in place with the subrect's own movement delta
 	// added to every vector (CheekyFoveatedDLSS approach), so DLSS reprojects

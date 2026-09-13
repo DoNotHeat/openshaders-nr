@@ -1,8 +1,12 @@
 // Blends DLSS subrect output back onto the stretched background in kMAIN.
 // Replaces the hard CopySubresourceRegion with a feathered transition at the
-// subrect boundary.  Two blend modes:
-//   0 = Feather  – smoothstep alpha ramp over FeatherWidth pixels
-//   1 = Dither   – noise-perturbed gradient in feather band (DitherStrength controls noise)
+// subrect boundary.  Three blend modes:
+//   0 = Feather      – smoothstep alpha ramp over FeatherWidth pixels (inside)
+//   1 = Dither       – noise-perturbed gradient in feather band (DitherStrength)
+//   2 = OuterFeather – subrect stays full DLSS to its edge; a band OUTSIDE the
+//                      subrect fades from the clamped DLSS edge color to the
+//                      stretched background over OuterWidth pixels.  C0-continuous
+//                      at the boundary (alpha=1 on both sides of the edge).
 
 cbuffer BlendCB : register(b0)
 {
@@ -10,13 +14,20 @@ cbuffer BlendCB : register(b0)
 	uint DstOffsetY;       // SBS destination Y (usually 0, non-zero if subrect offset)
 	uint SubWidth;         // DLSS output width  (subrect)
 	uint SubHeight;        // DLSS output height (subrect)
-	uint BlendMode;        // 0 = Feather, 1 = Dither
+	uint BlendMode;        // 0 = Feather, 1 = Dither, 2 = OuterFeather
 	float FeatherWidth;    // Feather band in pixels (default ~64)
 	uint FrameIndex;       // For dither noise animation
 	uint SrcOffsetX;       // Source X offset (0 for most modes, non-zero for Extreme strip)
 	float DitherStrength;  // 0 = pure smooth gradient, 1 = natural noise, 2 = aggressive dither
 	float Roundness;       // 0 = rectangular boundary, 1 = elliptical
-	float _pad0, _pad1;
+	uint DstLimitMinX;     // Eye region clamp (SBS): outer band must not spill into the other eye
+	uint DstLimitMaxX;     // Exclusive upper bound; DstLimitMaxX==0 = no limit
+	uint DstLimitMinY;     // Vertical clamp (subrect near the eye's top/bottom edge)
+	uint DstLimitMaxY;     // Exclusive upper bound; DstLimitMaxY==0 = no limit
+	float OuterWidth;      // Outer feather band width in pixels (mode 2)
+	uint BandX;            // Dispatch padding in X (outer band size)
+	uint BandY;            // Dispatch padding in Y
+	float _pad0;
 }
 
 Texture2D<float4> SrcTex : register(t0);    // DLSS subrect output
@@ -31,14 +42,80 @@ float BlueNoise(uint2 pos, uint frame)
 	return frac(52.9829189 * frac(0.06711056 * x + 0.00583715 * y));
 }
 
+// Signed distance to the subrect edge in pixels: positive inside, 0 at the
+// boundary, negative outside.  Rectangular: max over per-axis signed distances.
+// Roundness>0 morphs toward an ellipse (superellipse, same field as the
+// interior modes so the boundary shape is identical on both sides).
+float EdgeDistance(float2 pos)
+{
+	if (Roundness > 0.0) {
+		float2 extent = float2(SubWidth, SubHeight) * 0.5;
+		float2 scaled = abs(pos + 0.5 - extent) / extent;
+		float shape = lerp(max(scaled.x, scaled.y), length(scaled), saturate(Roundness));
+		// shape: 0 at center, 1 at edge midpoints, >1 past corners
+		return (1.0 - shape) * min(extent.x, extent.y);
+	}
+	float extentX = SubWidth * 0.5;
+	float extentY = SubHeight * 0.5;
+	float dx = extentX - abs(pos.x + 0.5 - extentX);
+	float dy = extentY - abs(pos.y + 0.5 - extentY);
+	return min(dx, dy);
+}
+
 [numthreads(8, 8, 1)] void main(uint3 tid : SV_DispatchThreadID) {
-	if (tid.x >= SubWidth || tid.y >= SubHeight)
+	// Dispatch domain: interior (SubWidth x SubHeight) plus an OuterWidth band
+	// on each side, all relative to an origin shifted by the band size.
+	int2 base = (int2)tid.xy - int2(BandX, BandY);
+	bool inside = base.x >= 0 && base.x < (int)SubWidth && base.y >= 0 && base.y < (int)SubHeight;
+
+	int2 srcPos = int2(base.x + (int)SrcOffsetX, base.y);
+	int2 dstPos = int2(base.x + (int)DstOffsetX, base.y + (int)DstOffsetY);
+
+	if (BlendMode == 2) {
+		// ── Outer feather ──
+		// Eye-region clamp: the outer band must never write into the other
+		// eye's half of the SBS target (binocular garbage) or outside the
+		// target entirely. A zero Max means "no limit" on that axis.
+		if ((DstLimitMaxX != 0 && (dstPos.x < (int)DstLimitMinX || dstPos.x >= (int)DstLimitMaxX)) ||
+			(DstLimitMaxY != 0 && (dstPos.y < (int)DstLimitMinY || dstPos.y >= (int)DstLimitMaxY)))
+			return;
+		if (dstPos.x < 0 || dstPos.y < 0)
+			return;
+
+		if (inside) {
+			// Interior: pure DLSS all the way to the edge — keeps the upscale
+			// sharp and makes the boundary C0-continuous with the outer band.
+			DstTex[uint2(dstPos)] = SrcTex.Load(int3(srcPos, 0));
+			return;
+		}
+
+		// Outside the subrect: fade from the clamped DLSS edge color to the
+		// background over the band. Clamp-sampling repeats the edge texel —
+		// acceptable because the background under this band is the stretched
+		// version of the same content, so edge colors nearly match.
+		float dist = -EdgeDistance(float2(base));  // positive outside
+		float alpha = 1.0 - smoothstep(0.0, OuterWidth, dist);
+		// Full DLSS at the edge (alpha=1) decaying to pure background.
+		if (alpha <= 0.0)
+			return;
+
+		// Clamp source coords to the subrect (edge-extend).
+		int2 clamped = clamp(srcPos, int2((int)SrcOffsetX, 0),
+			int2((int)(SrcOffsetX + SubWidth) - 1, (int)SubHeight - 1));
+		float4 dlssEdge = SrcTex.Load(int3(clamped, 0));
+		float4 bg = DstTex[uint2(dstPos)];
+		DstTex[uint2(dstPos)] = lerp(bg, dlssEdge, alpha);
+		return;
+	}
+
+	// ── Interior modes (Feather / Dither): unchanged domain ──
+	if (!inside)
 		return;
 
-	uint2 srcPos = uint2(tid.x + SrcOffsetX, tid.y);
-	uint2 dstPos = uint2(tid.x + DstOffsetX, tid.y + DstOffsetY);
+	uint2 srcU = uint2(srcPos);
+	uint2 dstU = uint2(dstPos);
 
-	float4 dlss = SrcTex.Load(int3(srcPos, 0));
+	float4 dlss = SrcTex.Load(int3(srcU, 0));
 
 	// Distance from nearest edge of the SUBRECT in subrect-local pixel space.
 	//
@@ -48,24 +125,16 @@ float BlueNoise(uint2 pos, uint frame)
 	// concatenated SBS strip), so srcPos.x = tid.x + SrcOffsetX could exceed
 	// SubWidth, making distR negative and breaking the feather band entirely
 	// — the strip would never blend correctly with the background. Use the
-	// dispatch-local tid.xy so distances are in [0, SubWidth-1] regardless
+	// dispatch-local coordinates so distances are in [0, SubWidth-1] regardless
 	// of the source-side offset.
-	float distL = (float)tid.x;
-	float distR = (float)(SubWidth - 1 - tid.x);
-	float distT = (float)tid.y;
-	float distB = (float)(SubHeight - 1 - tid.y);
+	float distL = (float)base.x;
+	float distR = (float)(SubWidth - 1 - base.x);
+	float distT = (float)base.y;
+	float distB = (float)(SubHeight - 1 - base.y);
 
-	// Roundness morphs the boundary from a rectangle toward an ellipse
-	// (CheekyFoveatedDLSS). Scaled per-axis distance runs 0 at the center to
-	// 1 at the edge midpoints: max() is the rectangle's distance field (1 on
-	// its whole boundary), length() the ellipse's (1 at midpoints, >1 past
-	// the corners) — lerp sweeps the superellipse between.
 	float edgeDist;
 	if (Roundness > 0.0) {
-		float2 extent = float2(SubWidth, SubHeight) * 0.5;
-		float2 scaled = abs(tid + 0.5 - extent) / extent;
-		float shape = lerp(max(scaled.x, scaled.y), length(scaled), saturate(Roundness));
-		edgeDist = (1.0 - shape) * min(extent.x, extent.y);
+		edgeDist = max(EdgeDistance(float2(base)), 0.0);
 	} else {
 		edgeDist = min(min(distL, distR), min(distT, distB));
 	}

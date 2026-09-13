@@ -200,7 +200,7 @@ namespace FoveatedRenderImpl
 			uint32_t dstCropY = (uint32_t)(uv.y * p.eyeHeightOut);
 			uint32_t dstX = (i == 1 ? p.eyeWidthOut : 0) + dstCropX;
 			BlendSubrectToOutput(Core::vrSubrectColorOut[i]->resource.get(), p.colorDst, p.colorDstUAV,
-				dstX, dstCropY, subOutW, subOutH);
+				dstX, dstCropY, subOutW, subOutH, 0, i * p.eyeWidthOut, p.eyeWidthOut, p.eyeHeightOut);
 		}
 
 		return true;
@@ -287,7 +287,7 @@ namespace FoveatedRenderImpl
 			uint32_t dstCropY = p.isFullEye ? 0 : (uint32_t)(uv.y * p.eyeHeightOut);
 			uint32_t dstX = (i == 1 ? p.eyeWidthOut : 0) + dstCropX;
 			BlendSubrectToOutput(Core::vrFasterColorOut[i]->resource.get(), p.colorDst, p.colorDstUAV,
-				dstX, dstCropY, subOutW, subOutH);
+				dstX, dstCropY, subOutW, subOutH, 0, i * p.eyeWidthOut, p.eyeWidthOut, p.eyeHeightOut);
 		}
 
 		return true;

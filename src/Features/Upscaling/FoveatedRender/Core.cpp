@@ -656,8 +656,16 @@ namespace FoveatedRenderImpl::Ops
 		uint32_t SrcOffsetX;
 		float DitherStrength;
 		float Roundness;
-		uint32_t _pad0, _pad1;
+		uint32_t DstLimitMinX;
+		uint32_t DstLimitMaxX;
+		uint32_t DstLimitMinY;
+		uint32_t DstLimitMaxY;
+		float OuterWidth;
+		uint32_t BandX;
+		uint32_t BandY;
+		float _pad0, _pad1, _pad2;  // explicit: 80 bytes, no implicit alignas padding
 	};
+	static_assert(sizeof(BlendCB) == 80, "BlendCB must match the HLSL cbuffer layout (5 x 16-byte registers)");
 
 	uint64_t ComputeSubrectUVHash(const Util::Subrect::UVRegion& leftUV,
 		const Util::Subrect::UVRegion& rightUV, uint32_t mode)
@@ -712,7 +720,8 @@ namespace FoveatedRenderImpl::Ops
 	}
 
 	void BlendSubrectToOutput(ID3D11Resource* dlssSrc, ID3D11Resource* dst, ID3D11UnorderedAccessView* dstUAV,
-		uint32_t dstOffsetX, uint32_t dstOffsetY, uint32_t subWidth, uint32_t subHeight, uint32_t srcOffsetX)
+		uint32_t dstOffsetX, uint32_t dstOffsetY, uint32_t subWidth, uint32_t subHeight, uint32_t srcOffsetX,
+		uint32_t eyeBaseX, uint32_t eyeWidthOut, uint32_t eyeHeightOut)
 	{
 		auto context = globals::d3d::context;
 		auto& foveated = globals::features::upscaling.foveatedRender;
@@ -784,6 +793,19 @@ namespace FoveatedRenderImpl::Ops
 			Core::vrBlendSrcSRVOwner = dlssSrc;
 		}
 
+		const bool outerFeather = blendMode == FoveatedRender::SubrectBlendMode::kOuterFeather;
+		// Band padding added to the dispatch on every side; the shader shifts
+		// its base coordinate back by this amount.
+		const uint32_t band = outerFeather ?
+			std::min<uint32_t>((uint32_t)std::ceil(foveated.settings.subrectOuterFeatherWidth), 128) : 0;
+		// Eye-region clamp for the outer band: never write outside the eye's
+		// own half of the SBS target (binocular garbage) or past the target
+		// edges. Zero Max means "no limit" for the shader (non-SBS callers).
+		const uint32_t limitMinX = outerFeather ? eyeBaseX : 0;
+		const uint32_t limitMaxX = outerFeather ? std::min(eyeBaseX + eyeWidthOut, dstOffsetX + subWidth + band) : 0;
+		const uint32_t limitMinY = 0;
+		const uint32_t limitMaxY = outerFeather ? std::min(eyeHeightOut, dstOffsetY + subHeight + band) : 0;
+
 		{
 			D3D11_MAPPED_SUBRESOURCE mapped;
 			if (FAILED(context->Map(Core::vrSubrectBlendCB.get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
@@ -795,13 +817,20 @@ namespace FoveatedRenderImpl::Ops
 			cb->DstOffsetY = dstOffsetY;
 			cb->SubWidth = subWidth;
 			cb->SubHeight = subHeight;
-			cb->BlendMode = (blendMode == FoveatedRender::SubrectBlendMode::kDither) ? 1 : 0;
+			cb->BlendMode = outerFeather ? 2 : (blendMode == FoveatedRender::SubrectBlendMode::kDither ? 1 : 0);
 			cb->FeatherWidth = foveated.settings.subrectFeatherWidth;
 			cb->FrameIndex = globals::state->frameCount;
 			cb->SrcOffsetX = srcOffsetX;
 			cb->DitherStrength = foveated.settings.subrectDitherStrength;
 			cb->Roundness = foveated.settings.subrectRoundness;
-			cb->_pad0 = cb->_pad1 = 0;
+			cb->DstLimitMinX = limitMinX;
+			cb->DstLimitMaxX = limitMaxX;
+			cb->DstLimitMinY = limitMinY;
+			cb->DstLimitMaxY = limitMaxY;
+			cb->OuterWidth = outerFeather ? foveated.settings.subrectOuterFeatherWidth : 0.0f;
+			cb->BandX = band;
+			cb->BandY = band;
+			cb->_pad0 = cb->_pad1 = cb->_pad2 = 0;
 			context->Unmap(Core::vrSubrectBlendCB.get(), 0);
 		}
 
@@ -813,7 +842,9 @@ namespace FoveatedRenderImpl::Ops
 		ID3D11UnorderedAccessView* uavs[] = { dstUAV };
 		context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 
-		context->Dispatch((subWidth + 7) / 8, (subHeight + 7) / 8, 1);
+		const uint32_t dimW = subWidth + 2 * band;
+		const uint32_t dimH = subHeight + 2 * band;
+		context->Dispatch((dimW + 7) / 8, (dimH + 7) / 8, 1);
 
 		ID3D11ShaderResourceView* nullSRV[1] = {};
 		ID3D11UnorderedAccessView* nullUAV[1] = {};

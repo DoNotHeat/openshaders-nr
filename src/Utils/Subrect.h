@@ -155,7 +155,24 @@ namespace Util::Subrect
 
 		/** @brief Get the current crop region in UV coordinates. */
 		const UVRegion& GetUV() const { return gazeOffsetActive ? gazeShiftedUV : currentUV; }
-		const UVRegion& GetRightEyeUV() const { return gazeOffsetActive ? gazeShiftedRightUV : (stereoEnabled ? currentRightUV : currentUV); }
+		const UVRegion& GetRightEyeUV() const
+		{
+			return gazeOffsetActive ? gazeShiftedRightUV : (stereoEnabled ? offsetRightUV : currentUV);
+		}
+
+		/**
+		 * @brief Persistent manual offset of the right-eye region relative to its
+		 * auto-mirrored position, in UV units of the per-eye region.
+		 *
+		 * HMD lens geometry and per-eye projection asymmetry mean the mirrored
+		 * square can land slightly off the content the other eye's square covers,
+		 * reading as binocular doubling. This offset nudges the right square back
+		 * into fusion without touching the left eye or the base crop. Applied on
+		 * top of (i.e. composed with) any active gaze offset. Persists in settings.
+		 */
+		void SetStereoOffset(float offsetX, float offsetY);
+		float GetStereoOffsetX() const { return stereoOffsetX; }
+		float GetStereoOffsetY() const { return stereoOffsetY; }
 
 		/**
 		 * @brief Set per-eye gaze-following offsets applied on top of the base crop.
@@ -216,6 +233,13 @@ namespace Util::Subrect
 
 		UVRegion currentUV{};
 		UVRegion currentRightUV{};
+		// currentRightUV + stereoOffset, kept in sync by ClampCurrentUV /
+		// SetStereoOffset. GetRightEyeUV hands this out so callers never see a
+		// stale offset after a crop edit.
+		UVRegion offsetRightUV{};
+		// Manual binocular alignment (see SetStereoOffset). Persisted.
+		float stereoOffsetX = 0.0f;
+		float stereoOffsetY = 0.0f;
 		bool stereoEnabled = false;
 		// Gaze-following offset applied on top of the base crop (see
 		// SetGazeOffset). Kept separate so it never accumulates or persists.
@@ -235,6 +259,7 @@ namespace Util::Subrect
 
 		void EnsureDefaultPreset();
 		void ClampCurrentUV();
+		void ApplyStereoOffset();
 		void ApplyPreset(int index);
 		void SyncRightUV();
 	};
