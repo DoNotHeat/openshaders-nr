@@ -248,8 +248,8 @@ FoveatedRender::FoveationProfile FoveatedRender::GetFoveationProfile() const
 	profile.coverageScale = coverageScale;
 	profile.centerHorizontalScale = FoveatedCommon::ClampCenterHorizontalScale(
 		coverageH > 1e-4f ? coverageW / coverageH : 1.0f);
-	profile.centerOffsets[0] = { (leftUV.x + leftUV.w * 0.5f) - 0.5f, (leftUV.y + leftUV.h * 0.5f) - 0.5f };
-	profile.centerOffsets[1] = { (rightUV.x + rightUV.w * 0.5f) - 0.5f, (rightUV.y + rightUV.h * 0.5f) - 0.5f };
+	profile.centerOffsets[0] = float2{ (leftUV.x + leftUV.w * 0.5f) - 0.5f, (leftUV.y + leftUV.h * 0.5f) - 0.5f };
+	profile.centerOffsets[1] = float2{ (rightUV.x + rightUV.w * 0.5f) - 0.5f, (rightUV.y + rightUV.h * 0.5f) - 0.5f };
 	return profile;
 }
 
@@ -967,8 +967,8 @@ void FoveatedRender::DrawSettings()
 		auto renderer = globals::game::renderer;
 		if (renderer) {
 			auto& fb = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kVR_FRAMEBUFFER];
-			auto* tex = static_cast<ID3D11Texture2D*>(fb.texture);
-			subrectController.DrawEditor(fb.SRV, tex, 0.5f, 0.0f, Util::Subrect::OpaquePreviewBlendCallback);
+			auto* tex = Util::AsReal(fb.texture);
+			subrectController.DrawEditor(Util::AsReal(fb.SRV), tex, 0.5f, 0.0f, Util::Subrect::OpaquePreviewBlendCallback);
 		} else {
 			subrectController.DrawEditor(nullptr, nullptr, 0.5f);
 		}

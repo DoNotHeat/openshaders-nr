@@ -132,6 +132,13 @@ public:
 	};
 	void OverrideAmbientLighting(DirectionalAmbientColors& DirectionalAmbientColors);
 
+	DirectionalAmbientColors vanillaAmbientCache{};
+	DirectionalAmbientColors gradedAmbientCache{};
+	RE::NiColor ambientSpecularTintCache{};
+	bool ambientSpecularTintCacheValid = false;
+	float ambientSpecularFresnelCache = 0.0f;
+	bool ambientGradeCacheValid = false;
+
 	void ModifySky(RE::BSRenderPass* Pass);
 	__declspec(noinline) void ModifyParticle(RE::BSRenderPass* Pass);
 	void ParticleShaderHacks();

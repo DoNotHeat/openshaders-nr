@@ -1,6 +1,7 @@
 #include "SubsurfaceScattering.h"
 
 #include "../I18n/I18n.h"
+#include "../Utils/UI.h"
 #include "Deferred.h"
 #include "GpuPass.h"
 #include "ShaderCache.h"
@@ -26,7 +27,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 void SubsurfaceScattering::DrawSettings()
 {
 	if (ImGui::TreeNodeEx(T(TKEY("settings"), "Settings"), ImGuiTreeNodeFlags_DefaultOpen)) {
-		ImGui::Checkbox(T(TKEY("enable_character_lighting"), "Enable Character Lighting"), (bool*)&settings.EnableCharacterLighting);
+		Util::CheckboxFlag(T(TKEY("enable_character_lighting"), "Enable Character Lighting"), settings.EnableCharacterLighting);
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::Text("%s", T(TKEY("enable_character_lighting_tooltip"), "Vanilla feature."));
 		}
@@ -245,8 +246,8 @@ void SubsurfaceScattering::DrawSSS()
 
 		blurCBData.SSSS_FOVY = atan(1.0f / cameraData.projMat.m[0][0]) * 2.0f * (180.0f / 3.14159265359f);
 
-		blurCBData.BaseProfile = { settings.BaseProfile.BlurRadius, settings.BaseProfile.Thickness, 0, 0 };
-		blurCBData.HumanProfile = { settings.HumanProfile.BlurRadius, settings.HumanProfile.Thickness, 0, 0 };
+		blurCBData.BaseProfile = float4{ settings.BaseProfile.BlurRadius, settings.BaseProfile.Thickness, 0, 0 };
+		blurCBData.HumanProfile = float4{ settings.HumanProfile.BlurRadius, settings.HumanProfile.Thickness, 0, 0 };
 
 		blurCBData.BurleySamples = settings.BurleySamples;
 		// Burley always does full albedo removal/reapply; scatter mode only applies to Separable SSS.
@@ -273,11 +274,11 @@ void SubsurfaceScattering::DrawSSS()
 		auto normal = renderer->GetRuntimeData().renderTargets[NORMALROUGHNESS];
 
 		ID3D11ShaderResourceView* views[5];
-		views[0] = main.SRV;
+		views[0] = Util::AsReal(main.SRV);
 		views[1] = Util::GetCurrentSceneDepthSRV(true);
-		views[2] = mask.SRV;
-		views[3] = albedo.SRV;
-		views[4] = normal.SRV;
+		views[2] = Util::AsReal(mask.SRV);
+		views[3] = Util::AsReal(albedo.SRV);
+		views[4] = Util::AsReal(normal.SRV);
 
 		context->CSSetShaderResources(0, ARRAYSIZE(views), views);
 
@@ -325,7 +326,7 @@ void SubsurfaceScattering::DrawSSS()
 				views[0] = blurHorizontalTemp->srv.get();
 				context->CSSetShaderResources(0, 1, views);
 
-				ID3D11UnorderedAccessView* uavs[1] = { main.UAV };
+				ID3D11UnorderedAccessView* uavs[1] = { Util::AsReal(main.UAV) };
 				context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 
 				auto shader = GetComputeShaderVerticalBlur();
@@ -338,7 +339,7 @@ void SubsurfaceScattering::DrawSSS()
 			{
 				CS_GPU_PASS("SubsurfaceScattering::Burley");
 
-				ID3D11UnorderedAccessView* uavs[1] = { main.UAV };
+				ID3D11UnorderedAccessView* uavs[1] = { Util::AsReal(main.UAV) };
 				context->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
 
 				auto shader = GetComputeShaderBurley();
@@ -377,15 +378,15 @@ void SubsurfaceScattering::SetupResources()
 		auto main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 
 		D3D11_TEXTURE2D_DESC texDesc{};
-		main.texture->GetDesc(&texDesc);
+		main.texture->GetDesc(Util::AsW32(&texDesc));
 
 		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-		main.SRV->GetDesc(&srvDesc);
+		main.SRV->GetDesc(Util::AsW32(&srvDesc));
 
 		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-		main.UAV->GetDesc(&uavDesc);
+		main.UAV->GetDesc(Util::AsW32(&uavDesc));
 
 		blurHorizontalTemp = new Texture2D(texDesc);
 		blurHorizontalTemp->CreateSRV(srvDesc);
@@ -462,7 +463,8 @@ ID3D11ComputeShader* SubsurfaceScattering::GetComputeShaderBurley()
 
 void SubsurfaceScattering::DataLoaded()
 {
-	isBeastRaceKeyword = RE::TESForm::LookupByEditorID("IsBeastRace")->As<RE::BGSKeyword>();
+	if (auto* form = RE::TESForm::LookupByEditorID("IsBeastRace"))
+		isBeastRaceKeyword = form->As<RE::BGSKeyword>();
 }
 
 void SubsurfaceScattering::PostPostLoad()

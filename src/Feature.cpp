@@ -13,9 +13,11 @@
 #include "Features/ExponentialHeightFog.h"
 #include "Features/ExtendedMaterials.h"
 #include "Features/ExtendedTranslucency.h"
+#include "Features/FeatureOverwrites.h"
 #include "Features/FoliageLighting.h"
 #include "Features/GrassCollision.h"
 #include "Features/GrassLighting.h"
+#include "Features/GrassOptimizations.h"
 #include "Features/HDRDisplay.h"
 #include "Features/HairSpecular.h"
 #include "Features/HorizonFix.h"
@@ -29,6 +31,7 @@
 #include "Features/PostProcessing.h"
 #include "Features/RemoteControl.h"
 #include "Features/RenderDoc.h"
+#include "Features/SceneManager.h"
 #include "Features/SceneSelector.h"
 #include "Features/ScreenSpaceGI.h"
 #include "Features/ScreenSpaceShadows.h"
@@ -52,12 +55,9 @@
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "SettingsOverrideManager.h"
-#include "Utils/Format.h"
-#include "WeatherManager.h"
-#include "WeatherVariableRegistry.h"
-
 #include "State.h"
 #include "TruePBR.h"
+#include "Utils/Format.h"
 
 void Feature::Load(json& o_json)
 {
@@ -170,6 +170,9 @@ void Feature::Load(json& o_json)
 			logger::error("Feature has empty short name, cannot add to feature issues list");
 		}
 	} else {
+		if (!UsesMainSettings())
+			return;
+
 		// No errors, load settings now
 		if (o_json[GetName()].is_structured()) {
 			logger::info("Loading {} settings", GetName());
@@ -188,7 +191,8 @@ void Feature::Load(json& o_json)
 
 void Feature::Save(json& o_json)
 {
-	SaveSettings(o_json[GetName()]);
+	if (UsesMainSettings())
+		SaveSettings(o_json[GetName()]);
 }
 
 bool Feature::ValidateCache(CSimpleIniA& a_ini)
@@ -240,6 +244,7 @@ namespace
 			&globals::features::volumetricShadows,
 			&globals::features::grassLighting,
 			&globals::features::grassCollision,
+			&globals::features::grassOptimizations,
 			&globals::features::screenSpaceShadows,
 			&globals::features::extendedMaterials,
 			&globals::features::wetnessEffects,
@@ -271,6 +276,8 @@ namespace
 			&globals::features::csEditor,
 			&globals::features::sceneSelector,
 			&globals::features::csUtility,
+			&globals::features::featureOverwrites,
+			&globals::features::sceneManager,
 			&globals::features::screenshotFeature,
 			&globals::features::linearLighting,
 #if defined(ENABLE_EFFECTS11)
@@ -321,6 +328,21 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 	} else {
 		return GetAllFeatures();
 	}
+}
+
+const std::vector<Feature*>& Feature::GetRenderPassHookFeatures()
+{
+	// Built once from the full feature list; VR developer mode's feature-list toggle (see
+	// GetFeatureList() above) won't retroactively add/remove hook features until restart.
+	static const std::vector<Feature*> hookFeatures = [] {
+		std::vector<Feature*> v;
+		for (auto* feature : GetFeatureList()) {
+			if (feature->WantsRenderPassHook())
+				v.push_back(feature);
+		}
+		return v;
+	}();
+	return hookFeatures;
 }
 
 Feature* Feature::FindRegisteredFeatureByShortName(const std::string& shortName)
@@ -425,10 +447,12 @@ std::vector<std::string> Feature::GetLoadedFeatureNames()
 
 bool Feature::ToggleAtBootSetting()
 {
+	if (IsAlwaysEnabled())
+		return false;
 	auto state = globals::state;
 	const std::string featureName = GetShortName();
 	auto disabled = state->IsFeatureDisabled(featureName);
-	state->SetFeatureDisabled(featureName, !disabled);
+	state->SetFeatureBootEnabled(featureName, disabled);
 
 	return state->IsFeatureDisabled(featureName);  // Return the new state
 }
@@ -454,8 +478,13 @@ bool Feature::ReapplyOverrideSettings()
 
 	if (appliedCount > 0) {
 		// Load the override settings back into the feature
-		LoadSettings(featureJson);
-		return true;
+		try {
+			LoadSettings(featureJson);
+			return true;
+		} catch (const std::exception& e) {
+			logger::warn("Failed to reapply override settings for {}. Error: {}", featureName, e.what());
+			return false;
+		}
 	}
 
 	return false;
@@ -549,7 +578,7 @@ std::string Feature::GetDisplayCategory() const
 	if (category == FeatureCategories::kSky)
 		return T("feature.category.sky", "Sky");
 	if (category == FeatureCategories::kUtility)
-		return T("feature.category.utility", "Utility");
+		return T("feature.category.utility", "Utilities");
 	if (category == FeatureCategories::kWater)
 		return T("feature.category.water", "Water");
 

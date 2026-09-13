@@ -925,7 +925,7 @@ void ColorGrading::SetupResources()
 		auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
 
 		D3D11_TEXTURE2D_DESC texDesc;
-		gameTexMainCopy.texture->GetDesc(&texDesc);
+		gameTexMainCopy.texture->GetDesc(Util::AsW32(&texDesc));
 
 		texDesc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
@@ -1053,18 +1053,9 @@ void ColorGrading::SetupResources()
 void ColorGrading::ClearShaderCache()
 {
 	BumpShaderGeneration();
-	const auto shaderPtrs = std::array{
-		&colorgradingCS,
-		&lutgenCS
-	};
-
 	{
 		std::lock_guard lock(shaderMutex);
-		for (auto shader : shaderPtrs)
-			if ((*shader)) {
-				(*shader)->Release();
-				shader->detach();
-			}
+		Util::ClearShaders<ID3D11ComputeShader>({ colorgradingCS, lutgenCS });
 	}
 
 	globals::shaderCache->ClearStandaloneComputeCache(L"PostProcessing/ColorGrading");

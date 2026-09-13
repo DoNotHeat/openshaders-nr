@@ -24,7 +24,7 @@ void ENBEffect::Execute()
 	}
 
 	// Execute with: input (16bit HDR), output (10bit SDR), temp (10bit SDR)
-	auto [executed, inOutput] = ExecuteTechniqueSequence(GetSelectedTechnique(), textureOriginal.SRV, *textureSDRTemp, *textureSDRTemp2);
+	auto [executed, inOutput] = ExecuteTechniqueSequence(GetSelectedTechnique(), Util::AsReal(textureOriginal.SRV), *textureSDRTemp, *textureSDRTemp2);
 
 	if (executed && !inOutput) {
 		textureManager.SwapTextures("TextureSDRTemp", "TextureSDRTemp2");
@@ -53,17 +53,17 @@ void ENBEffect::UpdateEffectVariables()
 	params01[3].z = baseData.cinematic.contrast;
 	params01[3].w = baseData.cinematic.brightness;
 
-	params01[4] = { baseData.tint.color.red,
+	params01[4] = float4{ baseData.tint.color.red,
 		baseData.tint.color.green,
 		baseData.tint.color.blue,
 		baseData.tint.amount };
 
-	params01[5] = { modData.data[RE::ImageSpaceModData::kFadeR] * modAmount,
+	params01[5] = float4{ modData.data[RE::ImageSpaceModData::kFadeR] * modAmount,
 		modData.data[RE::ImageSpaceModData::kFadeG] * modAmount,
 		modData.data[RE::ImageSpaceModData::kFadeB] * modAmount,
 		modData.data[RE::ImageSpaceModData::kFadeAmount] * modAmount };
 
-	params01[6] = { 1, 1, 1, 1 };
+	params01[6] = float4{ 1, 1, 1, 1 };
 
 	SetVectorVariable("Params01", &params01, sizeof(params01));
 

@@ -58,7 +58,7 @@ void Vignette::SetupResources()
 		auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
 
 		D3D11_TEXTURE2D_DESC texDesc;
-		gameTexMainCopy.texture->GetDesc(&texDesc);
+		gameTexMainCopy.texture->GetDesc(Util::AsW32(&texDesc));
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
 			.Format = texDesc.Format,
@@ -87,17 +87,9 @@ void Vignette::SetupResources()
 void Vignette::ClearShaderCache()
 {
 	BumpShaderGeneration();
-	const auto shaderPtrs = std::array{
-		&vignetteCS
-	};
-
 	{
 		std::lock_guard lock(shaderMutex);
-		for (auto shader : shaderPtrs)
-			if ((*shader)) {
-				(*shader)->Release();
-				shader->detach();
-			}
+		Util::ClearShaders<ID3D11ComputeShader>({ vignetteCS });
 	}
 
 	globals::shaderCache->ClearStandaloneComputeCache(L"PostProcessing/Vignette");

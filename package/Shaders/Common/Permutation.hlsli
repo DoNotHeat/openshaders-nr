@@ -79,7 +79,11 @@ namespace Permutation
 		static const uint AdditiveLighting = (1 << 6);
 		// Fork-only flags reserve the high end so upstream's next sequential flag never collides.
 		static const uint IsEye = (1u << 31);
-		static const uint IsCharacter = (1u << 30);
+		// DLSSNR character bit lives BELOW upstream's sequence (28): upstream took
+		// 30 (IsCharacterRainSurface) and 29 (IsHeldWeapon). Mirrors State.h.
+		static const uint IsCharacter = (1u << 28);
+		static const uint IsCharacterRainSurface = (1u << 30);
+		static const uint IsHeldWeapon = (1u << 29);
 	}
 
 	namespace ExtraFeatureFlags

@@ -105,7 +105,7 @@ void LocalExposure::SetupResources()
 	// Get screen dimensions from game render target
 	auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
 	D3D11_TEXTURE2D_DESC mainDesc;
-	gameTexMainCopy.texture->GetDesc(&mainDesc);
+	gameTexMainCopy.texture->GetDesc(Util::AsW32(&mainDesc));
 
 	uint fullW = mainDesc.Width;
 	uint fullH = mainDesc.Height;
@@ -294,17 +294,9 @@ void LocalExposure::SetupResources()
 void LocalExposure::ClearShaderCache()
 {
 	BumpShaderGeneration();
-	const auto shaderPtrs = std::array{
-		&setupCS, &downsampleCS, &blurHorizontalCS, &blurVerticalCS, &gridCS, &resolveCS
-	};
-
 	{
 		std::lock_guard lock(shaderMutex);
-		for (auto shader : shaderPtrs)
-			if ((*shader)) {
-				(*shader)->Release();
-				shader->detach();
-			}
+		Util::ClearShaders<ID3D11ComputeShader>({ setupCS, downsampleCS, blurHorizontalCS, blurVerticalCS, gridCS, resolveCS });
 	}
 
 	globals::shaderCache->ClearStandaloneComputeCache(L"PostProcessing/LocalExposure");

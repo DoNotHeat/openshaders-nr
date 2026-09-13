@@ -7,12 +7,9 @@
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "Menu/ThemeManager.h"
-#include "SceneSettingsManager.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "VRAPI/CSpluginapi.h"
-
-#define DLLEXPORT __declspec(dllexport)
 
 std::list<std::string> errors;
 
@@ -46,7 +43,7 @@ void InitializeLog([[maybe_unused]] spdlog::level::level_enum a_level = spdlog::
 	spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] [%s:%#] %v");
 }
 
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_skse)
+SKSE_PLUGIN_LOAD(const SKSE::LoadInterface* a_skse)
 {
 #ifndef NDEBUG
 	while (!REX::W32::IsDebuggerPresent()) {};
@@ -58,7 +55,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface* a_s
 	return Load();
 }
 
-extern "C" DLLEXPORT constinit auto SKSEPlugin_Version = []() noexcept {
+SKSE_PLUGIN_VERSION = []() noexcept {
 	SKSE::PluginVersionData v;
 	v.PluginName(Plugin::NAME.data());
 	v.PluginVersion(Plugin::VERSION);
@@ -67,7 +64,7 @@ extern "C" DLLEXPORT constinit auto SKSEPlugin_Version = []() noexcept {
 	return v;
 }();
 
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface*, SKSE::PluginInfo* pluginInfo)
+SKSE_PLUGIN_QUERY(const SKSE::QueryInterface*, SKSE::PluginInfo* pluginInfo)
 {
 	pluginInfo->name = SKSEPlugin_Version.pluginName;
 	pluginInfo->infoVersion = SKSE::PluginInfo::kVersion;
@@ -101,9 +98,6 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 
 				// Run feature PostPostLoad() first so features can disable themselves if needed
 				Feature::ForEachLoadedFeature("PostPostLoad", [](Feature* feature) { feature->PostPostLoad(); });
-
-				// Register scene settings event handler (Interior Only transitions)
-				SceneSettingsManager::MenuOpenCloseEventHandler::Register();
 
 				// Now validate disk cache after features have had a chance to modify their state
 				shaderCache->ValidateDiskCache();
@@ -162,10 +156,7 @@ void MessageHandler(SKSE::MessagingInterface::Message* message)
 bool Load()
 {
 	if (REL::Module::IsVR()) {  // Pre-ReInit check; globals::game::isVR not populated yet
-		// Floor covers 0.238.0's BSShadowLight::ctor (100810) / BSLight::IsInRange
-		// (101299) and 0.250.0's SetBackHemisphereAccumulator (101600, guarded by
-		// ShadowParabolicNullAccumulatorFix against a vanilla null-this crash).
-		REL::IDDB::get().IsVRAddressLibraryAtLeastVersion("0.250.0", true);
+		REL::IDDB::get().IsVRAddressLibraryAtLeastVersion("0.264.0", true);
 	}
 
 	auto privateProfileRedirectorVersion = Util::GetDllVersion(L"Data/SKSE/Plugins/PrivateProfileRedirector.dll");

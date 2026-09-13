@@ -20,6 +20,7 @@
 #include "Features/InteriorSun.h"
 #include "Features/PerformanceOverlay.h"
 #include "Features/PostProcessing.h"
+#include "Features/SceneManager.h"
 #include "Features/SceneSelector.h"
 #include "Features/Skin.h"
 #include "Features/SkySync.h"
@@ -37,10 +38,9 @@
 #include "TruePBR.h"
 #include "Utils/FileSystem.h"
 #include "Utils/Game.h"
+#include "Utils/SettingsPatch.h"
 #include "Utils/SphericalHarmonics.h"
 #include "VRAPI/CSpluginapi.h"
-#include "WeatherManager.h"
-#include "WeatherVariableRegistry.h"
 
 #ifdef TRACY_ENABLE
 static thread_local std::vector<TracyCZoneCtx> s_tracyPerfZones;
@@ -78,29 +78,19 @@ void State::UpdateSkyShaderPermutation(RE::BSRenderPass* a_pass)
 void State::Draw()
 {
 	ZoneScoped;
+	if (globals::features::sceneManager.loaded)
+		globals::features::sceneManager.Update();
 
 	auto shaderCache = globals::shaderCache;
-	auto weatherManager = globals::weatherManager;
-	auto sceneSettingsManager = globals::sceneSettingsManager;
 	auto& terrainBlending = globals::features::terrainBlending;
 	auto& terrainHelper = globals::features::terrainHelper;
 	auto& cloudShadows = globals::features::cloudShadows;
-	auto& csEditor = globals::features::csEditor;
-	auto& sceneSelector = globals::features::sceneSelector;
 	auto& skin = globals::features::skin;
 	auto& truePBR = globals::features::truePBR;
 	auto context = globals::d3d::context;
 	auto& volumetricShadows = globals::features::volumetricShadows;
 
 	if (shaderCache->IsEnabled()) {
-		// Process deferred cell transitions (interior detection)
-		sceneSettingsManager->Update();
-
-		if (csEditor.loaded || sceneSelector.loaded) {
-			ZoneScopedN("WeatherManager::UpdateFeatures");
-			weatherManager->UpdateFeatures();
-		}
-
 		if (terrainBlending.loaded && terrainBlending.settings.Enabled) {
 			ZoneScopedN("TerrainBlending::TerrainShaderHacks");
 			terrainBlending.TerrainShaderHacks();
@@ -229,7 +219,7 @@ State::TonemapOwner State::GetTonemapOwner()
 
 #if defined(ENABLE_EFFECTS11)
 	auto& effects11 = globals::features::effects11;
-	if (effects11.loaded && !IsMainOrLoadingMenuOpen() && effects11.WantsTonemapOwnership())
+	if (effects11.loaded && !IsFullScreenMenuOpen() && effects11.WantsTonemapOwnership())
 		cachedOwner = TonemapOwner::kEffects11;
 	else
 #endif
@@ -244,6 +234,11 @@ State::TonemapOwner State::GetTonemapOwner()
 bool State::HandlePostProcessing(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_output)
 {
 #if defined(ENABLE_EFFECTS11)
+	// VR-only: world-space menus need vanilla's kMENUBG compositor handoff, which
+	// Effects11's tonemap doesn't replicate; flatrim's blur should keep grading.
+	if (globals::game::isVR && a_output == RE::RENDER_TARGETS::kMENUBG)
+		return false;
+
 	if (GetTonemapOwner() != TonemapOwner::kEffects11 ||
 		!globals::features::effects11.RenderTonemap(a_input, a_output))
 		return false;
@@ -262,7 +257,7 @@ void State::SetOutputRenderTarget(RE::RENDER_TARGET a_output)
 {
 	auto renderer = globals::game::renderer;
 	auto& outputRT = renderer->GetRuntimeData().renderTargets[a_output];
-	globals::d3d::context->OMSetRenderTargets(1, &outputRT.RTV, nullptr);
+	globals::d3d::context->OMSetRenderTargets(1, Util::AsReal(&outputRT.RTV), nullptr);
 
 	auto shadowState = globals::game::shadowState;
 	auto applyStateData = [a_output](auto& stateData) {
@@ -364,12 +359,6 @@ void State::Setup()
 
 	Feature::ForEachLoadedFeature("SetupResources", [](Feature* feature) { feature->SetupResources(); });
 	globals::deferred->SetupResources();
-
-	// Load per-weather settings after features are setup
-	globals::weatherManager->LoadPerWeatherSettingsFromDisk();
-
-	// Load scene-specific settings (Interior Only, etc.)
-	globals::sceneSettingsManager->LoadAll();
 }
 
 static std::string GetConfigPath(State::ConfigMode a_configMode)
@@ -428,28 +417,9 @@ static bool WriteConfigAtomically(const std::filesystem::path& a_configPath, std
 	return true;
 }
 
-static void SaveUserOverrides(const nlohmann::json& a_settings)
-{
-	auto* overrideManager = SettingsOverrideManager::GetSingleton();
-	for (auto* feature : Feature::GetFeatureList()) {
-		const std::string featureName = feature->GetShortName();
-		const auto featureSettings = a_settings.find(feature->GetName());
-		if (!feature->loaded || !overrideManager->HasFeatureOverrides(featureName) || featureSettings == a_settings.end()) {
-			continue;
-		}
-
-		const json overrideSettings = overrideManager->GetMergedOverrideSettings(featureName, json::object());
-		overrideManager->SaveUserOverride(featureName, *featureSettings, overrideSettings);
-	}
-
-	const json globalOverrideSettings = overrideManager->GetMergedOverrideSettings("Global", json::object());
-	if (!globalOverrideSettings.empty()) {
-		overrideManager->SaveUserOverride("Global", a_settings, globalOverrideSettings);
-	}
-}
-
 void State::Load(ConfigMode a_configMode, bool a_allowReload)
 {
+	SceneSettingsManager::SceneLayerGuard sceneLayerGuard(*SceneSettingsManager::GetSingleton());
 	json settings;
 	bool errorDetected = false;
 
@@ -523,12 +493,13 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 
 	// Step 3: Discover and prepare overrides (applied after user settings, so overrides take priority)
 	auto overrideManager = SettingsOverrideManager::GetSingleton();
+	overrideManager->CaptureBaseSettings(settings);
 	size_t overridesDiscovered = overrideManager->DiscoverOverrides();
+	if (!overrideManager->CleanupStaleUserOverrides())
+		logger::warn("Could not clean up orphaned user overwrite settings");
 
-	// Cleanup stale user override files (where override hash has changed)
 	if (overridesDiscovered > 0) {
 		logger::info("Discovered {} override files", overridesDiscovered);
-		overrideManager->CleanupStaleUserOverrides();
 
 		// Apply global overrides to main settings
 		size_t globalOverrides = overrideManager->ApplyGlobalOverrides(settings);
@@ -546,22 +517,6 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 		// Load core settings (Menu, Advanced, General, Replace Original Shaders)
 		logger::info("Loading core settings");
 		LoadFromJson(settings);
-		// Ensure 'Disable at Boot' section exists in the JSON
-		if (!settings.contains("Disable at Boot") || !settings["Disable at Boot"].is_object()) {
-			// Initialize to an empty object if it doesn't exist
-			settings["Disable at Boot"] = json::object();
-		}
-
-		json& disabledFeaturesJson = settings["Disable at Boot"];
-		logger::info("Loading 'Disable at Boot' settings");
-
-		for (auto& [featureName, featureStatus] : disabledFeaturesJson.items()) {
-			if (featureStatus.is_boolean()) {
-				disabledFeatures[featureName] = featureStatus.get<bool>();
-			} else {
-				logger::warn("Invalid entry for feature '{}' in 'Disable at Boot', expected boolean.", featureName);
-			}
-		}
 		for (auto* feature : Feature::GetFeatureList()) {
 			try {
 				const std::string featureName = feature->GetShortName();
@@ -573,22 +528,15 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 				if (ec)
 					logger::warn("Could not determine install state for feature '{}': {}", featureName, ec.message());
 				feature->installed = ec || iniExists;
-				if (!disabledFeatures.contains(featureName) && feature->IsDisabledByDefault()) {
-					disabledFeatures[featureName] = true;
-					logger::info("Feature '{}' is disabled by default", featureName);
-				}
-				bool isDisabled = disabledFeatures.contains(featureName) && disabledFeatures[featureName];
+				bool isDisabled = !feature->IsAlwaysEnabled() && disabledFeatures.contains(featureName) && disabledFeatures[featureName];
 				if (!isDisabled) {
 					logger::info("Loading Feature: '{}'", featureName);
 
 					// Load base feature settings from merged config (default + user)
 					feature->Load(settings);
 
-					// Register weather variables (features opt-in by implementing this)
-					feature->RegisterWeatherVariables();
-
 					// Apply feature-specific overrides on top (overrides take priority over user settings)
-					if (overridesDiscovered > 0 && overrideManager->HasFeatureOverrides(featureName)) {
+					if (feature->UsesMainSettings() && overridesDiscovered > 0 && overrideManager->HasFeatureOverrides(featureName)) {
 						json featureJson;
 						feature->SaveSettings(featureJson);  // Get current settings as JSON
 
@@ -611,8 +559,6 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 						}
 					}
 
-					// Capture current values as user settings baseline for weather overrides
-					WeatherVariables::GlobalWeatherRegistry::GetSingleton()->CaptureFeatureUserSettings(featureName);
 				} else {
 					logger::info("Feature '{}' is disabled at boot.", featureName);
 				}
@@ -623,6 +569,10 @@ void State::Load(ConfigMode a_configMode, bool a_allowReload)
 				logger::warn("Error loading setting for feature '{}': {}", feature->GetShortName(), e.what());
 			}
 		}
+
+		json appliedSettings;
+		SaveToJson(appliedSettings);
+		overrideManager->CaptureAppliedSettings(appliedSettings);
 
 		if (settings["Version"].is_string() && settings["Version"].get<std::string>() != Plugin::VERSION.string()) {
 			logger::info("Found older config for version {}; upgrading to {}", (std::string)settings["Version"], Plugin::VERSION.string());
@@ -698,6 +648,7 @@ void State::SaveToJson(nlohmann::json& settings)
 		disabledFeaturesJson[featureName] = isDisabled;
 	}
 	settings["Disable at Boot"] = disabledFeaturesJson;
+	settings["Favorites"] = favoriteFeatures;
 
 	settings["Version"] = Plugin::VERSION.string();
 
@@ -708,12 +659,39 @@ void State::SaveToJson(nlohmann::json& settings)
 			feature->Save(settings);
 		}
 	}
+	SceneSettingsManager::GetSingleton()->RestoreBaselinesInSerializedSettings(settings);
 }
 
 void State::LoadFromJson(nlohmann::json& settings)
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
+	SceneSettingsManager::SceneLayerGuard sceneLayerGuard(*SceneSettingsManager::GetSingleton());
 	const auto shaderCache = globals::shaderCache;
+
+	disabledFeatures.clear();
+	if (const auto disabled = settings.find("Disable at Boot"); disabled != settings.end() && disabled->is_object()) {
+		for (const auto& [featureName, featureStatus] : disabled->items()) {
+			if (featureStatus.is_boolean())
+				disabledFeatures[featureName] = featureStatus.get<bool>();
+			else
+				logger::warn("Invalid entry for feature '{}' in 'Disable at Boot', expected boolean.", featureName);
+		}
+	}
+	for (auto* feature : Feature::GetFeatureList()) {
+		const auto featureName = feature->GetShortName();
+		if (feature->IsAlwaysEnabled())
+			disabledFeatures.erase(featureName);
+		else if (!disabledFeatures.contains(featureName) && feature->IsDisabledByDefault())
+			disabledFeatures[featureName] = true;
+	}
+
+	favoriteFeatures.clear();
+	if (const auto favorites = settings.find("Favorites"); favorites != settings.end() && favorites->is_object()) {
+		for (const auto& [featureName, favorite] : favorites->items()) {
+			if (favorite.is_boolean())
+				favoriteFeatures[featureName] = favorite.get<bool>();
+		}
+	}
 
 	// Load Menu settings
 	if (settings.contains("Menu") && settings["Menu"].is_object()) {
@@ -829,15 +807,25 @@ void State::Save(ConfigMode a_configMode, bool a_isExplicitUserSave)
 	}
 
 	std::string serializedSettings;
+	json effectiveSettings;
+	auto* overrideManager = SettingsOverrideManager::GetSingleton();
 	try {
 		SaveToJson(settings);
+		if (a_configMode == ConfigMode::USER) {
+			effectiveSettings = settings;
+			overrideManager->PrepareUserSettings(settings);
+		}
 		serializedSettings = settings.dump(1);
 	} catch (const std::exception& e) {
 		logger::warn("Failed to serialize settings for {}: {}", configPath, e.what());
 		return;
 	}
 
-	if (!WriteConfigAtomically(configPath, serializedSettings)) {
+	const auto saveConfig = [&] { return WriteConfigAtomically(configPath, serializedSettings); };
+	if (!(a_configMode == ConfigMode::USER && a_isExplicitUserSave ?
+				overrideManager->SaveUserEdits(effectiveSettings, saveConfig) :
+				saveConfig())) {
+		logger::error("Could not save settings and feature overwrites");
 		return;
 	}
 	logger::info("Saving settings to {}", configPath);
@@ -846,7 +834,7 @@ void State::Save(ConfigMode a_configMode, bool a_isExplicitUserSave)
 	// gated) was actually intentional; record it so next boot's disk-cache mismatch
 	// can auto-resolve instead of holding for the "Rebuild Cache" menu action.
 	if (a_configMode == ConfigMode::USER) {
-		SaveUserOverrides(settings);
+		overrideManager->CaptureBaseSettings(settings);
 		if (auto* shaderCache = globals::shaderCache)
 			shaderCache->MarkExpectedFeatureFlip();
 
@@ -859,6 +847,57 @@ void State::Save(ConfigMode a_configMode, bool a_isExplicitUserSave)
 		}
 #endif
 	}
+}
+
+bool State::SaveFeaturePreference(const json& patch)
+{
+	const auto configPath = GetConfigPath(ConfigMode::USER);
+	try {
+		json settings = json::object();
+		if (std::filesystem::exists(configPath)) {
+			std::ifstream input(configPath);
+			input >> settings;
+			if (!settings.is_object())
+				return false;
+		}
+		settings.merge_patch(patch);
+		std::filesystem::create_directories(Util::PathHelpers::GetCommunityShaderPath());
+
+		auto* overrides = SettingsOverrideManager::GetSingleton();
+		const auto serializedSettings = settings.dump(1);
+		if (!overrides->SaveUserEdits(patch, [&] { return WriteConfigAtomically(configPath, serializedSettings); }))
+			return false;
+		return true;
+	} catch (const std::exception& e) {
+		logger::error("Could not save feature preference to {}: {}", configPath, e.what());
+		return false;
+	}
+}
+
+bool State::SetFeatureBootEnabled(const std::string& featureName, bool enabled)
+{
+	if (!SaveFeaturePreference(json{ { "Disable at Boot", { { featureName, !enabled } } } }))
+		return false;
+	SetFeatureDisabled(featureName, !enabled);
+	globals::shaderCache->MarkExpectedFeatureFlip();
+	return true;
+}
+
+bool State::SetFeatureFavorite(const std::string& featureName, bool favorite)
+{
+	const auto* feature = Feature::FindFeatureByShortName(featureName);
+	if (!feature || !feature->IsInMenu() || feature == &globals::features::csEditor)
+		return false;
+	if (!SaveFeaturePreference(json{ { "Favorites", { { featureName, favorite } } } }))
+		return false;
+	favoriteFeatures[featureName] = favorite;
+	return true;
+}
+
+bool State::IsFeatureFavorite(const std::string& featureName) const
+{
+	const auto favorite = favoriteFeatures.find(featureName);
+	return favorite != favoriteFeatures.end() && favorite->second;
 }
 
 bool State::ValidateCache(CSimpleIniA& a_ini)
@@ -1042,9 +1081,9 @@ void State::SetupResources()
 	// Grab main texture to get resolution
 	// VR cannot use viewport->screenWidth/Height as it's the desktop preview window's resolution and not HMD
 	D3D11_TEXTURE2D_DESC texDesc{};
-	renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(&texDesc);
+	renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN].texture->GetDesc(Util::AsW32(&texDesc));
 
-	screenSize = { (float)texDesc.Width, (float)texDesc.Height };
+	screenSize = float2{ (float)texDesc.Width, (float)texDesc.Height };
 	globals::d3d::context->QueryInterface(__uuidof(pPerf), reinterpret_cast<void**>(&pPerf));
 
 	featureLevel = globals::d3d::device->GetFeatureLevel();
@@ -1265,7 +1304,7 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		auto dirLight = skyrim_cast<RE::NiDirectionalLight*>(shadowSceneNode->GetRuntimeData().sunLight->light.get());
 
 		auto& lightRuntimeData = dirLight->GetLightRuntimeData();
-		data.DirLightColor = { lightRuntimeData.diffuse.red, lightRuntimeData.diffuse.green, lightRuntimeData.diffuse.blue, 1.0f };
+		data.DirLightColor = float4{ lightRuntimeData.diffuse.red, lightRuntimeData.diffuse.green, lightRuntimeData.diffuse.blue, 1.0f };
 		data.DirLightColor *= lightRuntimeData.fade;
 
 		if (auto* imageSpaceManager = RE::ImageSpaceManager::GetSingleton()) {
@@ -1273,11 +1312,11 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		}
 
 		const auto& direction = dirLight->GetWorldDirection();
-		data.DirLightDirection = { -direction.x, -direction.y, -direction.z, 0.0f };
+		data.DirLightDirection = float4{ -direction.x, -direction.y, -direction.z, 0.0f };
 		data.DirLightDirection.Normalize();
 
 		data.CameraData = Util::GetCameraData();
-		data.BufferDim = { screenSize.x, screenSize.y, 1.0f / screenSize.x, 1.0f / screenSize.y };
+		data.BufferDim = float4{ screenSize.x, screenSize.y, 1.0f / screenSize.x, 1.0f / screenSize.y };
 		data.Timer = timer;
 
 		auto temporal = Util::GetTemporal();
@@ -1354,24 +1393,24 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 				const auto& skyPos = sky->root->world.translate;
 				float3 sunDirection = { sunPos.x - skyPos.x, sunPos.y - skyPos.y, sunPos.z - skyPos.z };
 				sunDirection.Normalize();
-				data.SunDirection = { sunDirection.x, sunDirection.y, sunDirection.z, 0.0f };
+				data.SunDirection = float4{ sunDirection.x, sunDirection.y, sunDirection.z, 0.0f };
 
 				if (sun->sunBase) {
 					if (const auto prop = skyrim_cast<RE::BSSkyShaderProperty*>(sun->sunBase->GetGeometryRuntimeData().shaderProperty.get()))
-						data.SunColor = { prop->kBlendColor.red * prop->kBlendColor.alpha, prop->kBlendColor.green * prop->kBlendColor.alpha, prop->kBlendColor.blue * prop->kBlendColor.alpha, prop->kBlendColor.alpha };
+						data.SunColor = float4{ prop->kBlendColor.red * prop->kBlendColor.alpha, prop->kBlendColor.green * prop->kBlendColor.alpha, prop->kBlendColor.blue * prop->kBlendColor.alpha, prop->kBlendColor.alpha };
 				}
 			}
 
 			if (auto masser = sky->masser) {
 				auto dir = Util::Moon::GetDirection(masser, moonAndStarsLoaded);
-				data.MasserDirection = { dir.x, dir.y, dir.z, 0.0f };
+				data.MasserDirection = float4{ dir.x, dir.y, dir.z, 0.0f };
 				if (masser->root && !masser->root->GetFlags().any(RE::NiAVObject::Flag::kHidden))
 					data.MasserColor = Util::Moon::GetBlendColor(masser, Util::Moon::MasserBaseColor, globals::features::skySync.settings.NewMoonIntensity, globals::features::skySync.settings.CrescentMoonIntensity, globals::features::skySync.settings.FullMoonIntensity);
 			}
 
 			if (auto secunda = sky->secunda) {
 				auto dir = Util::Moon::GetDirection(secunda, moonAndStarsLoaded);
-				data.SecundaDirection = { dir.x, dir.y, dir.z, 0.0f };
+				data.SecundaDirection = float4{ dir.x, dir.y, dir.z, 0.0f };
 				if (secunda->root && !secunda->root->GetFlags().any(RE::NiAVObject::Flag::kHidden))
 					data.SecundaColor = Util::Moon::GetBlendColor(secunda, Util::Moon::SecundaBaseColor, globals::features::skySync.settings.NewMoonIntensity, globals::features::skySync.settings.CrescentMoonIntensity, globals::features::skySync.settings.FullMoonIntensity);
 			}
@@ -1389,18 +1428,18 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 		dalcColors[5] = float3{ -m.entry[0][2] + t.x, -m.entry[1][2] + t.y, -m.entry[2][2] + t.z };  // -Z
 
 		SphericalHarmonics::SH2Color dalcSH = SphericalHarmonics::DALCToSH(dalcColors);
-		data.AmbientSHR = { dalcSH.r.c0, dalcSH.r.c1[0], dalcSH.r.c1[1], dalcSH.r.c1[2] };
-		data.AmbientSHG = { dalcSH.g.c0, dalcSH.g.c1[0], dalcSH.g.c1[1], dalcSH.g.c1[2] };
-		data.AmbientSHB = { dalcSH.b.c0, dalcSH.b.c1[0], dalcSH.b.c1[1], dalcSH.b.c1[2] };
+		data.AmbientSHR = float4{ dalcSH.r.c0, dalcSH.r.c1[0], dalcSH.r.c1[1], dalcSH.r.c1[2] };
+		data.AmbientSHG = float4{ dalcSH.g.c0, dalcSH.g.c1[0], dalcSH.g.c1[1], dalcSH.g.c1[2] };
+		data.AmbientSHB = float4{ dalcSH.b.c0, dalcSH.b.c1[0], dalcSH.b.c1[1], dalcSH.b.c1[2] };
 
 		data.HDRData = globals::features::hdrDisplay.GetSharedDataHDR();
 		data.RefractionScale = refractionScale;
 
 		// VR foveated shader detail (consumed by foveated SSR). Default to off; populate from the
 		// active foveation region only when SSR foveation is enabled and SSR is actually running.
-		data.VRFoveationData0 = { FoveatedCommon::kCenterScaleMax, FoveatedCommon::kCenterFeather, 1.0f,
+		data.VRFoveationData0 = float4{ FoveatedCommon::kCenterScaleMax, FoveatedCommon::kCenterFeather, 1.0f,
 			FoveatedCommon::GetShaderMode(FoveatedCommon::DetailMode::Off) };
-		data.VRFoveationCenterOffsets = { 0.0f, 0.0f, 0.0f, 0.0f };
+		data.VRFoveationCenterOffsets = float4{ 0.0f, 0.0f, 0.0f, 0.0f };
 		if (globals::game::isVR) {
 			const auto& vr = globals::features::vr;
 			const auto& dynamicCubemaps = globals::features::dynamicCubemaps;
@@ -1411,9 +1450,9 @@ void State::UpdateSharedData([[maybe_unused]] bool a_inWorld, [[maybe_unused]] b
 				if (profile.available) {  // available already implies an active (non-full) coverage scale
 					const float ssrMode = FoveatedCommon::GetShaderMode(FoveatedCommon::GetDetailMode(
 						true, vr.settings.EnableSSRFoveationHardCutoff));
-					data.VRFoveationData0 = { profile.coverageScale, FoveatedCommon::kCenterFeather,
+					data.VRFoveationData0 = float4{ profile.coverageScale, FoveatedCommon::kCenterFeather,
 						profile.centerHorizontalScale, ssrMode };
-					data.VRFoveationCenterOffsets = {
+					data.VRFoveationCenterOffsets = float4{
 						profile.centerOffsets[0].x, profile.centerOffsets[0].y,
 						profile.centerOffsets[1].x, profile.centerOffsets[1].y
 					};
@@ -1441,6 +1480,12 @@ void State::ClearDisabledFeatures()
 
 bool State::SetFeatureDisabled(const std::string& featureName, bool isDisabled)
 {
+	for (auto* feature : Feature::GetFeatureList()) {
+		if (feature->GetShortName() == featureName && feature->IsAlwaysEnabled()) {
+			disabledFeatures.erase(featureName);
+			return false;
+		}
+	}
 	bool wasPreviouslyDisabled = disabledFeatures.count(featureName) > 0 ? disabledFeatures[featureName] : false;  // Properly check if it exists
 	disabledFeatures[featureName] = isDisabled;
 
@@ -1456,6 +1501,9 @@ bool State::SetFeatureDisabled(const std::string& featureName, bool isDisabled)
 
 bool State::IsFeatureDisabled(const std::string& featureName)
 {
+	for (auto* feature : Feature::GetFeatureList())
+		if (feature->GetShortName() == featureName && feature->IsAlwaysEnabled())
+			return false;
 	return disabledFeatures.contains(featureName) && disabledFeatures[featureName];
 }
 

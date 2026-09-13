@@ -446,13 +446,20 @@ void ScreenSpaceGI::DrawSettings()
 
 void ScreenSpaceGI::LoadSettings(json& o_json)
 {
+	const auto previousShaderConfiguration = std::tuple{
+		settings.EnableGI, settings.EnableExperimentalSpecularGI,
+		settings.ResolutionMode, settings.EnableTemporalDenoiser, settings.EnableAdaptiveSampling
+	};
 	settings = o_json;
 	settings.ResolutionMode = std::clamp(settings.ResolutionMode, 0, 2);
 	if (!o_json.contains("ResourceProfile")) {
 		// Existing VR configs keep full resources if GI was active, else use lean AO-only.
 		settings.ResourceProfile = (REL::Module::IsVR() && !settings.EnableGI) ? kResourceProfileAOOnly : kResourceProfileFullGI;
 	}
-	recompileFlag = true;
+	recompileFlag |= previousShaderConfiguration != std::tuple{
+		settings.EnableGI, settings.EnableExperimentalSpecularGI,
+		settings.ResolutionMode, settings.EnableTemporalDenoiser, settings.EnableAdaptiveSampling
+	};
 }
 
 void ScreenSpaceGI::SaveSettings(json& o_json)
@@ -463,7 +470,7 @@ void ScreenSpaceGI::SaveSettings(json& o_json)
 RE::BSEventNotifyControl ScreenSpaceGI::MenuOpenCloseEventHandler::ProcessEvent(const RE::MenuOpenCloseEvent* a_event, RE::BSTEventSource<RE::MenuOpenCloseEvent>*)
 {
 	if (a_event->menuName == RE::LoadingMenu::MENU_NAME && !a_event->opening)
-		globals::features::screenSpaceGI.queuedResetHistory = true;
+		globals::features::screenSpaceGI.QueueHistoryReset();
 
 	return RE::BSEventNotifyControl::kContinue;
 }
@@ -531,7 +538,7 @@ void ScreenSpaceGI::SetupResources()
 		};
 
 		auto mainTex = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
-		mainTex.texture->GetDesc(&texDesc);
+		mainTex.texture->GetDesc(Util::AsW32(&texDesc));
 		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
 		if (allocateGIResources) {
@@ -723,12 +730,7 @@ void ScreenSpaceGI::SetupResources()
 
 void ScreenSpaceGI::ClearShaderCache()
 {
-	static const std::vector<winrt::com_ptr<ID3D11ComputeShader>*> shaderPtrs = {
-		&prefilterDepthsCompute, &prefilterRadianceCompute, &prefilterNormalCompute, &radianceDisoccCompute, &giCompute, &giEye0OnlyCompute, &blurCompute, &stereoSyncCompute, &reprojectCompute, &reprojectDebugCompute, &upsampleCompute
-	};
-
-	for (auto shader : shaderPtrs)
-		*shader = nullptr;
+	Util::ClearShaders<ID3D11ComputeShader>({ prefilterDepthsCompute, prefilterRadianceCompute, prefilterNormalCompute, radianceDisoccCompute, giCompute, giEye0OnlyCompute, blurCompute, stereoSyncCompute, reprojectCompute, reprojectDebugCompute, upsampleCompute });
 
 	CompileComputeShaders();
 }
@@ -817,7 +819,7 @@ void ScreenSpaceGI::UpdateSB()
 	                 float2{ (float)texRadiance->desc.Width, (float)texRadiance->desc.Height } :
 	                 float2{ (float)texWorkingDepth->desc.Width, (float)texWorkingDepth->desc.Height };
 	float2 dynres = Util::ConvertToDynamic(res);
-	dynres = { floor(dynres.x), floor(dynres.y) };
+	dynres = float2{ floor(dynres.x), floor(dynres.y) };
 
 	static float4x4 prevInvView[2] = {};
 
@@ -840,8 +842,8 @@ void ScreenSpaceGI::UpdateSB()
 			}
 
 			data.PrevInvViewMat[eyeIndex] = prevInvView[eyeIndex];
-			data.NDCToViewMul[eyeIndex] = { 2.0f / proj11, -2.0f / proj22 };
-			data.NDCToViewAdd[eyeIndex] = { -1.0f / proj11, 1.0f / proj22 };
+			data.NDCToViewMul[eyeIndex] = float2{ 2.0f / proj11, -2.0f / proj22 };
+			data.NDCToViewAdd[eyeIndex] = float2{ -1.0f / proj11, 1.0f / proj22 };
 			if (globals::game::isVR)
 				data.NDCToViewMul[eyeIndex].x *= 2;
 
@@ -877,6 +879,8 @@ void ScreenSpaceGI::UpdateSB()
 		data.MaxAccumFrames = settings.MaxAccumFrames;
 		data.BlurRadius = settings.BlurRadius;
 		data.DistanceNormalisation = settings.DistanceNormalisation;
+		useModeTextureThisFrame = settings.UseStereoReproject && globals::features::vr.stereoOpt.CanExternallyConsumeClassification();
+		data.UseModeTexture = useModeTextureThisFrame;
 	}
 
 	ssgiCB->Update(data);
@@ -994,11 +998,11 @@ void ScreenSpaceGI::DrawSSGI()
 		CS_GPU_PASS("ScreenSpaceGI::RadianceDisocc");
 
 		resetViews();
-		srvs.at(0) = runILPath ? rts[deferred->forwardRenderTargets[0]].SRV : nullptr;
+		srvs.at(0) = runILPath ? Util::AsReal(rts[deferred->forwardRenderTargets[0]].SRV) : nullptr;
 		srvs.at(1) = texWorkingDepth->srv.get();
-		srvs.at(2) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(2) = Util::AsReal(rts[NORMALROUGHNESS].SRV);
 		srvs.at(3) = texPrevGeo->srv.get();
-		srvs.at(4) = rts[RE::RENDER_TARGET::kMOTION_VECTOR].SRV;
+		srvs.at(4) = Util::AsReal(rts[RE::RENDER_TARGET::kMOTION_VECTOR].SRV);
 		srvs.at(5) = texAccumFrames[lastFrameAccumTexIdx]->srv.get();
 		srvs.at(6) = texAo[inputAoTexIdx]->srv.get();
 		if (runILPath) {
@@ -1052,7 +1056,7 @@ void ScreenSpaceGI::DrawSSGI()
 		CS_GPU_PASS("ScreenSpaceGI::PrefilterNormals");
 
 		resetViews();
-		srvs.at(0) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(0) = Util::AsReal(rts[NORMALROUGHNESS].SRV);
 		uavs.at(0) = uavNormal[0].get();
 		uavs.at(1) = uavNormal[1].get();
 		uavs.at(2) = uavNormal[2].get();
@@ -1076,7 +1080,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 		resetViews();
 		srvs.at(0) = texWorkingDepth->srv.get();
-		srvs.at(1) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(1) = Util::AsReal(rts[NORMALROUGHNESS].SRV);
 		srvs.at(2) = runILPath ? texRadiance->srv.get() : nullptr;
 		srvs.at(3) = texNoise->srv.get();
 		srvs.at(4) = texAccumFrames[lastFrameAccumTexIdx]->srv.get();
@@ -1086,6 +1090,8 @@ void ScreenSpaceGI::DrawSSGI()
 			srvs.at(7) = texGiSpecular[inputAoTexIdx]->srv.get();
 		}
 		srvs.at(8) = texNormal->srv.get();
+		if (useModeTextureThisFrame)
+			srvs.at(9) = globals::features::vr.stereoOpt.GetModeTextureSRV();
 
 		uavs.at(0) = texAo[!inputAoTexIdx]->uav.get();
 		if (runILPath) {
@@ -1118,6 +1124,8 @@ void ScreenSpaceGI::DrawSSGI()
 			srvs.at(2) = texIlY[inputGITexIdx]->srv.get();
 			srvs.at(3) = texIlCoCg[inputGITexIdx]->srv.get();
 		}
+		if (useModeTextureThisFrame)
+			srvs.at(4) = globals::features::vr.stereoOpt.GetModeTextureSRV();
 
 		uavs.at(0) = texAo[!inputAoTexIdx]->uav.get();
 		if (runILPath) {
@@ -1143,7 +1151,7 @@ void ScreenSpaceGI::DrawSSGI()
 
 		resetViews();
 		srvs.at(0) = texWorkingDepth->srv.get();
-		srvs.at(1) = rts[NORMALROUGHNESS].SRV;
+		srvs.at(1) = Util::AsReal(rts[NORMALROUGHNESS].SRV);
 		srvs.at(2) = texAccumFrames[lastFrameAccumTexIdx]->srv.get();
 		srvs.at(3) = texIlY[inputGITexIdx]->srv.get();
 		srvs.at(4) = texIlCoCg[inputGITexIdx]->srv.get();

@@ -257,7 +257,7 @@ void LensFlare::SetupResources()
 		auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
 
 		D3D11_TEXTURE2D_DESC baseDesc;
-		gameTexMainCopy.texture->GetDesc(&baseDesc);
+		gameTexMainCopy.texture->GetDesc(Util::AsW32(&baseDesc));
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
 			.Format = DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -397,19 +397,11 @@ void LensFlare::CreateFFTTextures(uint resolution)
 void LensFlare::ClearShaderCache()
 {
 	BumpShaderGeneration();
-	const auto shaderPtrs = std::array{
-		&thresholdCS, &ghostHaloCS, &blurDownCS, &blurUpCS, &mixCS,
-		&fftRowCS, &fftColCS, &fftRowInvCS, &fftColInvCS, &fftMultiplyCS,
-		&bokehPrepareCS, &fftThresholdCS, &fftGhostComposeCS
-	};
-
 	{
 		std::lock_guard lock(shaderMutex);
-		for (auto shader : shaderPtrs)
-			if ((*shader)) {
-				(*shader)->Release();
-				shader->detach();
-			}
+		Util::ClearShaders<ID3D11ComputeShader>({ thresholdCS, ghostHaloCS, blurDownCS, blurUpCS, mixCS,
+			fftRowCS, fftColCS, fftRowInvCS, fftColInvCS, fftMultiplyCS,
+			bokehPrepareCS, fftThresholdCS, fftGhostComposeCS });
 	}
 
 	globals::shaderCache->ClearStandaloneComputeCache(L"PostProcessing/LensFlare");

@@ -328,11 +328,13 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 	bool isHDR = hdr && hdr->settings.enableHDR;
 
 	// Wait for D3D11 to finish (includes ApplyHDR scene encoding AND UIBrightnessCS)
+	fenceValue++;
 	DX::ThrowIfFailed(d3d11Context->Signal(d3d11Fence.get(), fenceValue));
 	DX::ThrowIfFailed(commandQueue->Wait(d3d12Fence.get(), fenceValue));
-	fenceValue++;
 
 	// New frame, reset
+	if (frameFenceValues[frameIndex])
+		DX::ThrowIfFailed(d3d12Fence->SetEventOnCompletion(frameFenceValues[frameIndex], nullptr));
 	DX::ThrowIfFailed(commandAllocators[frameIndex]->Reset());
 	DX::ThrowIfFailed(commandLists[frameIndex]->Reset(commandAllocators[frameIndex].get(), nullptr));
 
@@ -403,9 +405,10 @@ HRESULT DX12SwapChain::Present(UINT SyncInterval, UINT Flags)
 		upscaling.streamlineDX12.EmitPCLMarker(sl::PCLMarker::ePresentEnd);
 
 	// Wait for D3D12 to finish
-	DX::ThrowIfFailed(commandQueue->Signal(d3d12Fence.get(), fenceValue));
-	DX::ThrowIfFailed(d3d11Context->Wait(d3d11Fence.get(), fenceValue));
 	fenceValue++;
+	DX::ThrowIfFailed(commandQueue->Signal(d3d12Fence.get(), fenceValue));
+	frameFenceValues[frameIndex] = fenceValue;
+	DX::ThrowIfFailed(d3d11Context->Wait(d3d11Fence.get(), fenceValue));
 
 	// Update the frame index
 	frameIndex = swapChain->GetCurrentBackBufferIndex();
@@ -698,12 +701,12 @@ void DX12SwapChain::CreateSharedResources()
 	// Create depth buffer
 	auto& main = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN];
 	D3D11_TEXTURE2D_DESC texDesc{};
-	main.texture->GetDesc(&texDesc);
+	main.texture->GetDesc(Util::AsW32(&texDesc));
 	texDesc.Format = DXGI_FORMAT_R32_FLOAT;
 	depthBufferShared12 = new WrappedResource(texDesc, d3d11Device.get(), d3d12Device.get(), "DX12SwapChain::DepthBufferShared");
 
 	// Create motion vector buffer
 	auto& motionVector = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
-	motionVector.texture->GetDesc(&texDesc);
+	motionVector.texture->GetDesc(Util::AsW32(&texDesc));
 	motionVectorBufferShared12 = new WrappedResource(texDesc, d3d11Device.get(), d3d12Device.get(), "DX12SwapChain::MotionVectorBufferShared");
 }

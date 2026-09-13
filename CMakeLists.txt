@@ -25,7 +25,7 @@ option(
 project(
     # gersemi: ignore
     CommunityShaders
-    VERSION 2.10.1
+    VERSION 2.12.0
     LANGUAGES CXX
 )
 
@@ -212,7 +212,8 @@ set_source_files_properties(
     "${STB_IMAGE_WRITE_IMPL}"
     PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON
-        COMPILE_OPTIONS "$<$<C_COMPILER_ID:MSVC>:/W0>"
+        COMPILE_OPTIONS
+            "$<$<OR:$<C_COMPILER_ID:MSVC>,$<C_COMPILER_ID:Clang>>:/W0>"
 )
 
 target_link_libraries(
@@ -418,6 +419,73 @@ configure_file(
 target_sources(
     "${PROJECT_NAME}"
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/cmake/ThemePresets.h
+)
+
+# #######################################################################################################################
+# # Scene settings catalog
+# #######################################################################################################################
+
+set(SCENE_SETTINGS_PYTHON_ARGS "")
+if(WIN32)
+    find_program(SCENE_SETTINGS_PYTHON_EXECUTABLE NAMES py.exe)
+    if(SCENE_SETTINGS_PYTHON_EXECUTABLE)
+        set(SCENE_SETTINGS_PYTHON_ARGS -3)
+    endif()
+endif()
+if(NOT SCENE_SETTINGS_PYTHON_EXECUTABLE)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(SCENE_SETTINGS_PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
+endif()
+
+set(SCENE_SETTINGS_CATALOG_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+set(SCENE_SETTINGS_CATALOG_HEADER
+    "${SCENE_SETTINGS_CATALOG_DIR}/SceneSettingsCatalog.generated.h"
+)
+set(SCENE_SETTINGS_CATALOG_SOURCE
+    "${SCENE_SETTINGS_CATALOG_DIR}/SceneSettingsCatalog.generated.cpp"
+)
+set(SCENE_SETTINGS_ADAPTERS_SOURCE
+    "${SCENE_SETTINGS_CATALOG_DIR}/FeatureSceneSettingsAdapters.generated.cpp"
+)
+
+file(
+    GLOB_RECURSE SCENE_SETTINGS_CATALOG_INPUTS
+    LIST_DIRECTORIES false
+    CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cxx"
+)
+
+add_custom_command(
+    OUTPUT
+        "${SCENE_SETTINGS_CATALOG_HEADER}"
+        "${SCENE_SETTINGS_CATALOG_SOURCE}"
+        "${SCENE_SETTINGS_ADAPTERS_SOURCE}"
+    COMMAND
+        ${SCENE_SETTINGS_PYTHON_EXECUTABLE} ${SCENE_SETTINGS_PYTHON_ARGS}
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_scene_settings_catalog.py"
+        --source-dir "${CMAKE_CURRENT_SOURCE_DIR}" --out-dir
+        "${SCENE_SETTINGS_CATALOG_DIR}" --min-entries 250
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/generate_scene_settings_catalog.py"
+        ${SCENE_SETTINGS_CATALOG_INPUTS}
+    COMMENT "Generating scene settings catalog"
+    VERBATIM
+)
+
+target_include_directories(
+    "${PROJECT_NAME}"
+    PRIVATE "${SCENE_SETTINGS_CATALOG_DIR}"
+)
+
+target_sources(
+    "${PROJECT_NAME}"
+    PRIVATE
+        "${SCENE_SETTINGS_CATALOG_HEADER}"
+        "${SCENE_SETTINGS_CATALOG_SOURCE}"
+        "${SCENE_SETTINGS_ADAPTERS_SOURCE}"
 )
 
 # #######################################################################################################################
@@ -634,7 +702,24 @@ list(TRANSFORM FEATURE_PATHS_SLASH APPEND /)
 
 # Install logic for AIO package
 # To copy AIO package at a folder do `${CMAKE_COMMAND} --install ${CMAKE_BINARY_DIR} --prefix ${AIO_DIR}`
-install(CODE "file(REMOVE_RECURSE \${CMAKE_INSTALL_PREFIX})")
+# REMOVE_RECURSE below wipes the ENTIRE --prefix dir first, so it must only
+# ever target the isolated AIO_DIR staging folder, never a live game install
+# (e.g. --prefix pointed at Data/) -- the guard below enforces this.
+install(
+    CODE
+        "
+    if(NOT \"\${CMAKE_INSTALL_PREFIX}\" STREQUAL \"${AIO_DIR}\")
+        message(FATAL_ERROR
+            \"Refusing to install: --prefix must be \\\"${AIO_DIR}\\\" \"
+            \"(got \\\"\${CMAKE_INSTALL_PREFIX}\\\"). This target recursively \"
+            \"deletes its entire --prefix directory before staging the AIO \"
+            \"package, so it must never be pointed at a live game install. \"
+            \"Use BuildRelease.bat <PRESET>-WITH-AUTO-DEPLOYMENT or the \"
+            \"DEPLOY_ALL/COPY_SHADERS targets to deploy to a game folder.\")
+    endif()
+    file(REMOVE_RECURSE \"\${CMAKE_INSTALL_PREFIX}\")
+"
+)
 install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION SKSE/Plugins COMPONENT SKSE)
 install(
     FILES $<TARGET_PDB_FILE:${PROJECT_NAME}>

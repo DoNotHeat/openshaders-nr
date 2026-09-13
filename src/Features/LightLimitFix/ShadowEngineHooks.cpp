@@ -96,8 +96,8 @@ namespace ShadowCasterManager
 			return;
 		auto* renderer = reinterpret_cast<RE::BSGraphics::Renderer*>(ctx.R15);
 		for (int i = 0; i < 8; i++) {
-			renderer->GetDepthStencilData().depthStencils[4].views[i] = reinterpret_cast<ID3D11DepthStencilView*>(globals::features::llf::normalDepthBuffer[i]);
-			renderer->GetDepthStencilData().depthStencils[4].readOnlyViews[i] = reinterpret_cast<ID3D11DepthStencilView*>(globals::features::llf::readOnlyDepthBuffer[i]);
+			renderer->GetDepthStencilData().depthStencils[4].views[i] = Util::CastTo<REX::W32::ID3D11DepthStencilView>(globals::features::llf::normalDepthBuffer[i]);
+			renderer->GetDepthStencilData().depthStencils[4].readOnlyViews[i] = Util::CastTo<REX::W32::ID3D11DepthStencilView>(globals::features::llf::readOnlyDepthBuffer[i]);
 		}
 	}
 
@@ -161,11 +161,11 @@ namespace ShadowCasterManager
 	{
 		for (int i = 8; i < shadowCount; i++) {
 			if (globals::features::llf::normalDepthBuffer[i]) {
-				reinterpret_cast<ID3D11DepthStencilView*>(globals::features::llf::normalDepthBuffer[i])->Release();
+				Util::CastTo<ID3D11DepthStencilView>(globals::features::llf::normalDepthBuffer[i])->Release();
 				globals::features::llf::normalDepthBuffer[i] = nullptr;
 			}
 			if (globals::features::llf::readOnlyDepthBuffer[i]) {
-				reinterpret_cast<ID3D11DepthStencilView*>(globals::features::llf::readOnlyDepthBuffer[i])->Release();
+				Util::CastTo<ID3D11DepthStencilView>(globals::features::llf::readOnlyDepthBuffer[i])->Release();
 				globals::features::llf::readOnlyDepthBuffer[i] = nullptr;
 			}
 		}
@@ -247,26 +247,26 @@ namespace ShadowCasterManager
 				const float sliceDim = static_cast<float>(AtlasBaseTile());
 				if (GetSlotTileTexels(slice, tile) && sliceDim > 0.0f) {
 					const float inv = 1.0f / sliceDim;
-					viewPort.TopLeftX = tile.x + viewPort.TopLeftX * inv * tile.size;
-					viewPort.TopLeftY = tile.y + viewPort.TopLeftY * inv * tile.size;
-					viewPort.Width = viewPort.Width * inv * tile.size;
-					viewPort.Height = viewPort.Height * inv * tile.size;
+					viewPort.topLeftX = tile.x + viewPort.topLeftX * inv * tile.size;
+					viewPort.topLeftY = tile.y + viewPort.topLeftY * inv * tile.size;
+					viewPort.width = viewPort.width * inv * tile.size;
+					viewPort.height = viewPort.height * inv * tile.size;
 				} else {
 					// No tile behind this slice: collapse the viewport so a
 					// stray raster clips to nothing instead of stomping other
 					// lights' tiles in the shared atlas.
-					viewPort.Width = 0.0f;
-					viewPort.Height = 0.0f;
+					viewPort.width = 0.0f;
+					viewPort.height = 0.0f;
 				}
 				return;
 			}
 			const float scale = s_lights.Lights[slice].pendingScale;
 			if (scale <= 0.0f || scale >= 1.0f)
 				return;
-			viewPort.TopLeftX *= scale;
-			viewPort.TopLeftY *= scale;
-			viewPort.Width *= scale;
-			viewPort.Height *= scale;
+			viewPort.topLeftX *= scale;
+			viewPort.topLeftY *= scale;
+			viewPort.width *= scale;
+			viewPort.height *= scale;
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -1309,9 +1309,22 @@ namespace ShadowCasterManager
 			// standalone thunks into their caller and consolidates them to a single live
 			// copy, so this patches that one instruction directly instead of a function entry.
 			const uint8_t xorRax[6] = { 0x48, 0x31, 0xC0, 0x90, 0x90, 0x90 };
-			if (REL::Module::IsAtLeast(REL::Version(1, 7, 99, 0))) {
+			if (REL::Module::get().version() == REL::Version(1, 7, 104, 0)) {
+				// Raw offset (unstable across 1.7.x point releases) -- verify the bytes
+				// before writing so a version that moved this instruction fails safe.
+				const uint8_t expected[6] = { 0x8B, 0x05, 0xAE, 0xE5, 0xBE, 0x00 };
 				const uint8_t xorEax[6] = { 0x31, 0xC0, 0x90, 0x90, 0x90, 0x90 };
-				REL::safe_write(REL::Offset(0x14ea854).address(), xorEax, 6);
+				const auto target = REL::Offset(0x14eaab4).address();
+				if (!REL::safe_write(target, xorEax, sizeof(xorEax), expected))
+					logger::warn("[SCM] focus-shadow suppression: unexpected bytes at 0x14eaab4 (game version moved this instruction), skipping patch");
+			} else if (REL::Module::IsAtLeast(REL::Version(1, 7, 99, 0))) {
+				// Raw offset (unstable across 1.7.x point releases) -- verify the bytes
+				// before writing so a version that moved this instruction fails safe.
+				const uint8_t expected[6] = { 0x8B, 0x05, 0x0E, 0xE8, 0xBE, 0x00 };
+				const uint8_t xorEax[6] = { 0x31, 0xC0, 0x90, 0x90, 0x90, 0x90 };
+				const auto target = REL::Offset(0x14ea854).address();
+				if (!REL::safe_write(target, xorEax, sizeof(xorEax), expected))
+					logger::warn("[SCM] focus-shadow suppression: unexpected bytes at 0x14ea854 (game version moved this instruction), skipping patch");
 			} else {
 				static REL::RelocationID uid1(10209, 10247);
 				REL::safe_write(uid1.address(), xorRax, 6);

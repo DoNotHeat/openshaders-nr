@@ -86,16 +86,16 @@ void SetupRenderTarget(RE::RENDER_TARGET target, D3D11_TEXTURE2D_DESC texDesc, D
 		data.texture = nullptr;
 	}
 
-	DX::ThrowIfFailed(device->CreateTexture2D(&texDesc, nullptr, &data.texture));
+	DX::ThrowIfFailed(device->CreateTexture2D(&texDesc, nullptr, Util::AsReal(&data.texture)));
 
 	if (texDesc.BindFlags & D3D11_BIND_SHADER_RESOURCE)
-		DX::ThrowIfFailed(device->CreateShaderResourceView(data.texture, &srvDesc, &data.SRV));
+		DX::ThrowIfFailed(device->CreateShaderResourceView(Util::AsReal(data.texture), &srvDesc, Util::AsReal(&data.SRV)));
 
 	if (texDesc.BindFlags & D3D11_BIND_RENDER_TARGET)
-		DX::ThrowIfFailed(device->CreateRenderTargetView(data.texture, &rtvDesc, &data.RTV));
+		DX::ThrowIfFailed(device->CreateRenderTargetView(Util::AsReal(data.texture), &rtvDesc, Util::AsReal(&data.RTV)));
 
 	if (texDesc.BindFlags & D3D11_BIND_UNORDERED_ACCESS)
-		DX::ThrowIfFailed(device->CreateUnorderedAccessView(data.texture, &uavDesc, &data.UAV));
+		DX::ThrowIfFailed(device->CreateUnorderedAccessView(Util::AsReal(data.texture), &uavDesc, Util::AsReal(&data.UAV)));
 }
 
 void Deferred::SetupResources()
@@ -110,10 +110,10 @@ void Deferred::SetupResources()
 		D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = {};
 		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
 
-		main.texture->GetDesc(&texDesc);
-		main.SRV->GetDesc(&srvDesc);
-		main.RTV->GetDesc(&rtvDesc);
-		main.UAV->GetDesc(&uavDesc);
+		main.texture->GetDesc(Util::AsW32(&texDesc));
+		main.SRV->GetDesc(Util::AsW32(&srvDesc));
+		main.RTV->GetDesc(Util::AsW32(&rtvDesc));
+		main.UAV->GetDesc(Util::AsW32(&uavDesc));
 
 		// Available targets:
 		// MAIN ONLY ALPHA
@@ -235,6 +235,11 @@ void Deferred::EarlyPrepasses()
 {
 	CS_GPU_PASS("Deferred::EarlyPrepass");
 
+	if (globals::game::isVR)
+		globals::features::vr.stereoOpt.SnapshotFinalDepthHistory(sceneDepthFinal);
+
+	sceneDepthFinal = false;
+
 	auto shaderCache = globals::shaderCache;
 
 	if (!shaderCache->IsEnabled())
@@ -274,6 +279,7 @@ void Deferred::PrepassPasses()
 
 void Deferred::StartDeferred()
 {
+	sceneDepthFinal = false;
 	if (!globals::state->inWorld)
 		return;
 	globals::state->UpdateSharedData(true, false);
@@ -337,9 +343,8 @@ void Deferred::StartDeferred()
 
 	OverrideBlendStates();
 
-	// VR: Classify Eye 1 pixels and write hardware stencil marks before geometry rendering.
-	// Only enable stencil culling when overwrite reprojection is available for this frame.
-	if (globals::game::isVR && globals::features::vr.IsStereoOptimizationCullingReady()) {
+	// Classifies Eye 1 for SSGI/Shadows reuse too, not just VR's own stereo optimization.
+	if (globals::game::isVR && globals::features::vr.IsStereoOptimizationDispatchReady()) {
 		globals::features::vr.stereoOpt.DispatchStencil();
 	}
 
@@ -390,6 +395,11 @@ void Deferred::DeferredPasses()
 	auto main = renderer->GetRuntimeData().renderTargets[forwardRenderTargets[0]];
 	auto normals = renderer->GetRuntimeData().renderTargets[forwardRenderTargets[2]];
 	auto depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
+	auto finalDepthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
+	// Water samples this texture for edge fade and refraction; a partial or
+	// dynamic-resolution-sized copy here left it stale and caused hard water intersections.
+	context->CopyResource(Util::AsReal(finalDepthCopy.texture), Util::AsReal(depth.texture));
+	sceneDepthFinal = true;
 	auto reflectance = renderer->GetRuntimeData().renderTargets[REFLECTANCE];
 
 	auto motionVectors = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMOTION_VECTOR];
@@ -421,16 +431,16 @@ void Deferred::DeferredPasses()
 		CS_GPU_PASS("Deferred::DeferredComposite");
 
 		ID3D11ShaderResourceView* srvs[16]{
-			specular.SRV,                                                                                    // t0  SpecularTexture
-			albedo.SRV,                                                                                      // t1  AlbedoTexture
-			normalRoughness.SRV,                                                                             // t2  NormalRoughnessTexture
-			masks.SRV,                                                                                       // t3  MasksTexture
+			Util::AsReal(specular.SRV),                                                                      // t0  SpecularTexture
+			Util::AsReal(albedo.SRV),                                                                        // t1  AlbedoTexture
+			Util::AsReal(normalRoughness.SRV),                                                               // t2  NormalRoughnessTexture
+			Util::AsReal(masks.SRV),                                                                         // t3  MasksTexture
 			dynamicCubemaps.loaded || globals::game::isVR ? Util::GetCurrentSceneDepthSRV(false) : nullptr,  // t4  DepthTexture (24/32-bit; HLSL type baked at compile via TERRAIN_BLENDING)
-			dynamicCubemaps.loaded ? reflectance.SRV : nullptr,                                              // t5  ReflectanceTexture
+			dynamicCubemaps.loaded ? Util::AsReal(reflectance.SRV) : nullptr,                                // t5  ReflectanceTexture
 			dynamicCubemaps.loaded ? dynamicCubemaps.envTexture->srv.get() : nullptr,                        // t6  EnvTexture
 			dynamicCubemaps.loaded ? dynamicCubemaps.envReflectionsTexture->srv.get() : nullptr,             // t7  EnvReflectionsTexture
 			dynamicCubemaps.loaded && skylighting.loaded ? skylighting.texProbeArray->srv.get() : nullptr,   // t8  SkylightingProbeArray
-			masks2.SRV,                                                                                      // t9  Masks2Texture (vertexAO in .x)
+			Util::AsReal(masks2.SRV),                                                                        // t9  Masks2Texture (vertexAO in .x)
 			ssgi_ao,                                                                                         // t10 SsgiAoTexture
 			ssgi_hq_spec ? nullptr : ssgi_y,                                                                 // t11 SsgiYTexture
 			ssgi_hq_spec ? nullptr : ssgi_cocg,                                                              // t12 SsgiCoCgTexture
@@ -449,7 +459,7 @@ void Deferred::DeferredPasses()
 		ID3D11ShaderResourceView* modeSRV = nullptr;
 		context->CSSetShaderResources(16, 1, &modeSRV);
 
-		ID3D11UnorderedAccessView* uavs[3]{ main.UAV, normals.UAV, motionVectors.UAV };
+		ID3D11UnorderedAccessView* uavs[3]{ Util::AsReal(main.UAV), Util::AsReal(normals.UAV), Util::AsReal(motionVectors.UAV) };
 		context->CSSetUnorderedAccessViews(0, ARRAYSIZE(uavs), uavs, nullptr);
 
 		if (auto* shader = interior ? GetComputeMainCompositeInterior() : GetComputeMainComposite()) {
@@ -623,7 +633,7 @@ void Deferred::SetShadowCascadeParameters(T& lightData, DirectionalShadowLightDa
 {
 	const auto count = std::min(lightData.shadowmapDescriptors.size(), static_cast<uint32_t>(std::size(dd.ShadowProj)));
 	for (uint32_t i = 0; i < count; i++) {
-		auto proj = DirectX::XMLoadFloat4x4(reinterpret_cast<const DirectX::XMFLOAT4X4*>(&lightData.shadowmapDescriptors[i].lightTransform));
+		auto proj = DirectX::XMLoadFloat4x4(Util::AsReal(&lightData.shadowmapDescriptors[i].lightTransform));
 		DirectX::XMStoreFloat4x4(&dd.ShadowProj[i], proj);
 
 		DirectX::XMMATRIX invProj = DirectX::XMMatrixInverse(nullptr, proj);
@@ -652,7 +662,7 @@ void Deferred::SetShadowCascadeParameters(T& lightData, DirectionalShadowLightDa
 		const auto& desc = lightData.focusShadowmapDescriptors[i];
 		if (!desc.isEnabled)
 			continue;  // descriptor unused this frame -- leave FocusShadowProj[i] at zero
-		auto proj = DirectX::XMLoadFloat4x4(reinterpret_cast<const DirectX::XMFLOAT4X4*>(&desc.lightTransform));
+		auto proj = DirectX::XMLoadFloat4x4(Util::AsReal(&desc.lightTransform));
 		DirectX::XMStoreFloat4x4(&dd.FocusShadowProj[i], proj);
 		dd.FocusShadowCount = i + 1;
 	}
@@ -674,8 +684,8 @@ void Deferred::CopyShadowLightData()
 	auto context = globals::d3d::context;
 
 	auto& dirData = sunShadowLight->GetShadowDirectionalLightRuntimeData();
-	dd.EndSplitDistances = { dirData.endSplitDistances[0], dirData.endSplitDistances[1] };
-	dd.StartSplitDistances = { dirData.startSplitDistances[0], dirData.startSplitDistances[1] };
+	dd.EndSplitDistances = float2{ dirData.endSplitDistances[0], dirData.endSplitDistances[1] };
+	dd.StartSplitDistances = float2{ dirData.startSplitDistances[0], dirData.startSplitDistances[1] };
 
 	if (globals::game::isVR)
 		SetShadowCascadeParameters(sunShadowLight->GetVRRuntimeData(), dd);
@@ -691,7 +701,7 @@ void Deferred::CopyShadowLightData()
 	context->PSSetShaderResources(98, 1, &srv);
 
 	// t99: cascade depth array used by LightLimitFix::GetDirectionalShadow for PCF sampling.
-	ID3D11ShaderResourceView* cascadeSRV = globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGET_DEPTHSTENCIL::kSHADOWMAPS_ESRAM].depthSRV;
+	ID3D11ShaderResourceView* cascadeSRV = Util::AsReal(globals::game::renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGET_DEPTHSTENCIL::kSHADOWMAPS_ESRAM].depthSRV);
 	context->PSSetShaderResources(99, 1, &cascadeSRV);
 }
 
@@ -804,17 +814,8 @@ void Deferred::Hooks::Main_RenderWorld_BlendedDecals::thunk(RE::BSShaderAccumula
 	func(This, RenderFlags);
 
 	deferred->EndDeferred();
-
-	// Copy depth from before water
-	auto renderer = globals::game::renderer;
-	auto context = globals::d3d::context;
-
-	auto depth = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN];
-	auto depthCopy = renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kPOST_ZPREPASS_COPY];
-
-	context->CopyResource(depthCopy.texture, depth.texture);
-
-	// After this point, water starts rendering
+	if (globals::game::isVR)
+		globals::features::vr.dynamicNearClip.CaptureDepth(This->camera);
 };
 
 void Deferred::Hooks::BSCubeMapCamera_RenderCubemap::thunk(RE::NiAVObject* camera, int a2, bool a3, bool a4, bool a5)

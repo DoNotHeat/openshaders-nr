@@ -12,12 +12,13 @@
 #include "LinearLighting.h"
 #include "Menu/PerformanceRenderer.h"
 #include "Profiler.h"
+#include "Utils/MathUtils.h"
 #include "Utils/UI.h"
 #include <bit>
 
 #include "Deferred.h"
 #include "Menu/ThemeManager.h"
-#include "Shadercache.h"
+#include "ShaderCache.h"
 #include "State.h"
 #include "Utils/D3D.h"
 #include "Utils/ExternalEmittance.h"
@@ -48,32 +49,25 @@ namespace
 	constexpr float kJsonPlacedLightIntensityMin = 0.0f;
 	constexpr float kJsonPlacedLightIntensityMax = 8.0f;
 
-	float ClampFiniteOrDefault(float a_value, float a_min, float a_max, float a_default)
-	{
-		if (!std::isfinite(a_value))
-			return a_default;
-		return std::clamp(a_value, a_min, a_max);
-	}
-
 	void SanitizeSettings(LightLimitFix::Settings& a_settings)
 	{
 		a_settings.ParticleLightsSaturation =
-			ClampFiniteOrDefault(a_settings.ParticleLightsSaturation, kParticleLightsSaturationMin, kParticleLightsSaturationMax, 1.0f);
+			Util::ClampFiniteOrDefault(a_settings.ParticleLightsSaturation, kParticleLightsSaturationMin, kParticleLightsSaturationMax, 1.0f);
 		a_settings.ParticleBrightness =
-			ClampFiniteOrDefault(a_settings.ParticleBrightness, kParticleBrightnessMin, kParticleBrightnessMax, 1.0f);
+			Util::ClampFiniteOrDefault(a_settings.ParticleBrightness, kParticleBrightnessMin, kParticleBrightnessMax, 1.0f);
 		a_settings.ParticleRadius =
-			ClampFiniteOrDefault(a_settings.ParticleRadius, kParticleRadiusMin, kParticleRadiusMax, 1.0f);
+			Util::ClampFiniteOrDefault(a_settings.ParticleRadius, kParticleRadiusMin, kParticleRadiusMax, 1.0f);
 		a_settings.BillboardBrightness =
-			ClampFiniteOrDefault(a_settings.BillboardBrightness, kBillboardBrightnessMin, kBillboardBrightnessMax, 1.0f);
+			Util::ClampFiniteOrDefault(a_settings.BillboardBrightness, kBillboardBrightnessMin, kBillboardBrightnessMax, 1.0f);
 		a_settings.BillboardRadius =
-			ClampFiniteOrDefault(a_settings.BillboardRadius, kBillboardRadiusMin, kBillboardRadiusMax, 1.0f);
+			Util::ClampFiniteOrDefault(a_settings.BillboardRadius, kBillboardRadiusMin, kBillboardRadiusMax, 1.0f);
 		a_settings.ParticleClusterThreshold =
-			ClampFiniteOrDefault(a_settings.ParticleClusterThreshold, kParticleClusterThresholdMin, kParticleClusterThresholdMax, 32.0f);
+			Util::ClampFiniteOrDefault(a_settings.ParticleClusterThreshold, kParticleClusterThresholdMin, kParticleClusterThresholdMax, 32.0f);
 		a_settings.MaxParticlesPerEmitter = std::clamp(a_settings.MaxParticlesPerEmitter, kMaxParticlesPerEmitterMin, kMaxParticlesPerEmitterMax);
 		a_settings.MaxParticleDistance =
-			ClampFiniteOrDefault(a_settings.MaxParticleDistance, kMaxParticleDistanceMin, kMaxParticleDistanceMax, 6000.0f);
+			Util::ClampFiniteOrDefault(a_settings.MaxParticleDistance, kMaxParticleDistanceMin, kMaxParticleDistanceMax, 6000.0f);
 		a_settings.JsonPlacedLightIntensity =
-			ClampFiniteOrDefault(a_settings.JsonPlacedLightIntensity, kJsonPlacedLightIntensityMin, kJsonPlacedLightIntensityMax, 1.0f);
+			Util::ClampFiniteOrDefault(a_settings.JsonPlacedLightIntensity, kJsonPlacedLightIntensityMin, kJsonPlacedLightIntensityMax, 1.0f);
 	}
 
 	void ClearStrictLightData(LightLimitFix::StrictLightDataCB& a_data, bool a_resetRoomIndex) noexcept
@@ -81,7 +75,7 @@ namespace
 		a_data.NumStrictLights = 0;
 		a_data.ShadowBitMask = 0;
 		a_data.FirstPerson = 0;
-		a_data.WorldEyePosition = {};
+		a_data.WorldEyePosition = float4{};
 		if (a_resetRoomIndex)
 			a_data.RoomIndex = -1;
 	}
@@ -99,13 +93,13 @@ namespace
 		auto hoverKey = ShadowCasterManager::GetHoveredLight();
 		if (hoverKey != 0 && key == hoverKey) {
 			float t = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 6.2831853f);
-			a_light.color = { 1.0f, 0.0f, 1.0f };  // magenta
-			a_light.fade = 4.0f + t * 4.0f;        // pulsed intensity
+			a_light.color = float3{ 1.0f, 0.0f, 1.0f };  // magenta
+			a_light.fade = 4.0f + t * 4.0f;              // pulsed intensity
 		} else if (ShadowCasterManager::IsHighlighted(key)) {
 			// Steady magenta on every light in the selected highlight group
 			// (populated by the table's group-button hover), distinct from
 			// the single pulsing hover light.
-			a_light.color = { 1.0f, 0.0f, 1.0f };
+			a_light.color = float3{ 1.0f, 0.0f, 1.0f };
 		}
 	}
 }
@@ -872,7 +866,7 @@ void LightLimitFix::BSLightingShader_SetupGeometry_GeometrySetupConstantPointLig
 			auto& runtimeData = niLight->GetLightRuntimeData();
 
 			LightData light{};
-			light.color = { runtimeData.diffuse.red, runtimeData.diffuse.green, runtimeData.diffuse.blue };
+			light.color = float3{ runtimeData.diffuse.red, runtimeData.diffuse.green, runtimeData.diffuse.blue };
 			light.lightFlags = std::bit_cast<LightFlags>(runtimeData.ambient.red);
 
 			if (isl.loaded) {
@@ -1190,7 +1184,7 @@ void LightLimitFix::UpdateLights()
 						auto& runtimeData = niLight->GetLightRuntimeData();
 
 						LightData light{};
-						light.color = { runtimeData.diffuse.red, runtimeData.diffuse.green, runtimeData.diffuse.blue };
+						light.color = float3{ runtimeData.diffuse.red, runtimeData.diffuse.green, runtimeData.diffuse.blue };
 						light.lightFlags = std::bit_cast<LightFlags>(runtimeData.ambient.red);
 
 						if (isl.loaded) {
@@ -1241,7 +1235,7 @@ void LightLimitFix::UpdateLights()
 					auto& runtimeData = niLight->GetLightRuntimeData();
 
 					LightData light{};
-					light.color = { runtimeData.diffuse.red, runtimeData.diffuse.green, runtimeData.diffuse.blue };
+					light.color = float3{ runtimeData.diffuse.red, runtimeData.diffuse.green, runtimeData.diffuse.blue };
 					light.lightFlags = std::bit_cast<LightFlags>(runtimeData.ambient.red);
 
 					if (isl.loaded) {
@@ -1501,7 +1495,7 @@ void LightLimitFix::UpdateShadowDemand()
 		ID3D11Buffer* cb = shadowDepthPyramidCB->CB();
 		context->CSSetConstantBuffers(0, 1, &cb);
 
-		ID3D11ShaderResourceView* srvs[] = { depth.depthSRV };
+		ID3D11ShaderResourceView* srvs[] = { Util::AsReal(depth.depthSRV) };
 		context->CSSetShaderResources(0, ARRAYSIZE(srvs), srvs);
 
 		ID3D11UnorderedAccessView* uavs[] = { tileDepthRange->uav.get() };
@@ -1547,7 +1541,7 @@ void LightLimitFix::UpdateShadowDemand()
 		ID3D11Buffer* cb = shadowDemandCB->CB();
 		context->CSSetConstantBuffers(0, 1, &cb);
 
-		ID3D11ShaderResourceView* srvs[] = { depth.depthSRV, lightGrid->srv.get(), lightIndexList->srv.get(), lights->srv.get(),
+		ID3D11ShaderResourceView* srvs[] = { Util::AsReal(depth.depthSRV), lightGrid->srv.get(), lightIndexList->srv.get(), lights->srv.get(),
 			tileDepthRange->srv.get() };
 		context->CSSetShaderResources(0, ARRAYSIZE(srvs), srvs);
 
