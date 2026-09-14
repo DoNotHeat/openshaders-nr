@@ -228,7 +228,7 @@ namespace NeuralRendering
 
 			// The composite shader declares its own MaskSampler register; bind the
 			// sampler at slot 0 (the shader's sampler space is separate in cslot terms).
-			ID3D11ShaderResourceView* srvs[3] = { originalSRV, neuralSRV, masks.SRV };
+			ID3D11ShaderResourceView* srvs[3] = { originalSRV, neuralSRV, Util::AsReal(masks.SRV) };
 			ID3D11UnorderedAccessView* uavs[1] = { dstUAV };
 			ID3D11Buffer* cb = skinMaskCB->CB();
 			ID3D11SamplerState* sampler = skinMaskSampler.get();
@@ -260,8 +260,10 @@ namespace NeuralRendering
 			const RE::BSGraphics::RenderTargetData& target,
 			winrt::com_ptr<ID3D11Texture2D>& holder)
 		{
+			// CommonLib v8 wraps the render-target fields in REX::W32 types; the
+			// rest of this file uses the real SDK types, so unwrap via AsReal.
 			if (target.texture)
-				return target.texture;
+				return Util::AsReal(target.texture);
 			auto resolveView = [&](ID3D11View* view) -> ID3D11Texture2D* {
 				if (!view)
 					return nullptr;
@@ -271,9 +273,9 @@ namespace NeuralRendering
 					return nullptr;
 				return holder.get();
 			};
-			if (auto* texture = resolveView(target.SRV))
+			if (auto* texture = resolveView(Util::AsReal(target.SRV)))
 				return texture;
-			return resolveView(target.RTV);
+			return resolveView(Util::AsReal(target.RTV));
 		}
 
 		bool EnsureColorResources(ID3D11Resource* source, std::uint32_t width, std::uint32_t height)
@@ -368,7 +370,7 @@ namespace NeuralRendering
 			context->CopyResource(color[0]->resource.get(), framebuffer);
 
 			const bool succeeded = Renderer::Instance().Apply(globals::d3d::device, context, 0,
-				color[0]->resource.get(), depth.texture, depth.depthSRV,
+				color[0]->resource.get(), Util::AsReal(depth.texture), Util::AsReal(depth.depthSRV),
 				upscaling.motionVectorCopyTexture->resource.get(), motionDesc.Width, motionDesc.Height,
 				totalDesc.Width, totalDesc.Height, static_cast<float>(motionDesc.Width),
 				static_cast<float>(motionDesc.Height), GetTuning(foveated.settings, 1.0f));
@@ -499,7 +501,7 @@ namespace NeuralRendering
 			return false;
 
 		D3D11_TEXTURE2D_DESC totalDesc{};
-		total.texture->GetDesc(&totalDesc);
+		Util::AsReal(total.texture)->GetDesc(&totalDesc);
 		const auto& leftUV = foveated.subrectController.GetUV();
 		const auto& rightUV = foveated.subrectController.GetRightEyeUV();
 		if (leftUV.w != rightUV.w || leftUV.h != rightUV.h)
@@ -527,7 +529,7 @@ namespace NeuralRendering
 				const std::uint32_t sbsX = (eye ? eyeWidthIn : 0) + cropX;
 				const D3D11_BOX sbsCrop{ sbsX, cropY, 0, sbsX + subInW, cropY + subInH, 1 };
 				context->CopySubresourceRegion(FoveatedRenderImpl::Core::vrSubrectDepth[eye]->resource.get(), 0, 0, 0, 0,
-					renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture, 0, &sbsCrop);
+					Util::AsReal(renderer->GetDepthStencilData().depthStencils[RE::RENDER_TARGETS_DEPTHSTENCIL::kMAIN].texture), 0, &sbsCrop);
 				context->CopySubresourceRegion(FoveatedRenderImpl::Core::vrSubrectMotionVectors[eye]->resource.get(), 0, 0, 0, 0,
 					upscaling.motionVectorCopyTexture ? upscaling.motionVectorCopyTexture->resource.get() : nullptr, 0, &sbsCrop);
 			}
@@ -548,7 +550,7 @@ namespace NeuralRendering
 		// Snapshot the pristine whole frame BEFORE ApplyStereo overwrites the subrects
 		// (the skin-mask composite needs the pre-evaluate originals to blend against).
 		const bool skinMaskActive = IsSkinMaskEnabled(foveated);
-		if (skinMaskActive && !EnsureColorResources(total.texture, totalDesc.Width, totalDesc.Height)) {
+		if (skinMaskActive && !EnsureColorResources(Util::AsReal(total.texture), totalDesc.Width, totalDesc.Height)) {
 			context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRTVs, savedDSV);
 			for (auto*& rtv : savedRTVs)
 				if (rtv) rtv->Release();
@@ -557,10 +559,10 @@ namespace NeuralRendering
 		}
 		if (skinMaskActive) {
 			if (!originalColor)
-				originalColor = Upscaling::CreateTextureFromSource(total.texture, totalDesc.Width, totalDesc.Height, false, true, true,
+				originalColor = Upscaling::CreateTextureFromSource(Util::AsReal(total.texture), totalDesc.Width, totalDesc.Height, false, true, true,
 					"NeuralRendering::SkinMaskOriginal");
 			if (!compositeColor)
-				compositeColor = Upscaling::CreateTextureFromSource(total.texture, totalDesc.Width, totalDesc.Height, false, true, true,
+				compositeColor = Upscaling::CreateTextureFromSource(Util::AsReal(total.texture), totalDesc.Width, totalDesc.Height, false, true, true,
 					"NeuralRendering::SkinMaskComposite");
 			if (!originalColor || !compositeColor || !originalColor->srv || !compositeColor->uav) {
 				context->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, savedRTVs, savedDSV);
@@ -569,7 +571,7 @@ namespace NeuralRendering
 				if (savedDSV) savedDSV->Release();
 				return false;
 			}
-			context->CopyResource(originalColor->resource.get(), total.texture);
+			context->CopyResource(originalColor->resource.get(), Util::AsReal(total.texture));
 		}
 
 		std::array<Renderer::StereoEyeInput, 2> inputs{};
@@ -618,7 +620,7 @@ namespace NeuralRendering
 			};
 		}
 		const bool succeeded = Renderer::Instance().ApplyStereo(globals::d3d::device, context,
-			total.texture, inputs, FoveatedRenderImpl::Core::vrSubrectInW, FoveatedRenderImpl::Core::vrSubrectInH,
+			Util::AsReal(total.texture), inputs, FoveatedRenderImpl::Core::vrSubrectInW, FoveatedRenderImpl::Core::vrSubrectInH,
 			outWidth, outHeight, GetTuning(foveated.settings,
 				activeRampFloor + (1.0f - activeRampFloor) * intensityRampLevel));
 		if (succeeded) {
@@ -641,7 +643,7 @@ namespace NeuralRendering
 			auto& masks = renderer->GetRuntimeData().renderTargets[MASKS];
 			if (masks.SRV) {
 				D3D11_TEXTURE2D_DESC masksDesc{};
-				masks.texture->GetDesc(&masksDesc);
+				Util::AsReal(masks.texture)->GetDesc(&masksDesc);
 				const float frameW = static_cast<float>(totalDesc.Width);
 				const float frameH = static_cast<float>(totalDesc.Height);
 				// The neural box is IDENTITY even below 100% quality: the evaluate
@@ -657,12 +659,12 @@ namespace NeuralRendering
 				const float boxOffsetXRight = (static_cast<float>(eyeWidth) + static_cast<float>(eyeWidth * rightUV.x)) / frameW;
 				const float boxOffsetY = static_cast<float>(totalDesc.Height * leftUV.y) / frameH;
 				if (CompositeWithSkinMask(context,
-						originalColor->srv.get(), total.SRV, compositeColor->uav.get(),
+						originalColor->srv.get(), Util::AsReal(total.SRV), compositeColor->uav.get(),
 						static_cast<float>(masksDesc.Width), static_cast<float>(masksDesc.Height),
 						totalDesc.Width, totalDesc.Height,
 						foveated.settings.neuralRenderingSkinMaskDebug,
 						boxScaleX, boxScaleY, boxOffsetXLeft, boxOffsetY, boxOffsetXRight)) {
-					context->CopyResource(total.texture, compositeColor->resource.get());
+					context->CopyResource(Util::AsReal(total.texture), compositeColor->resource.get());
 				}
 			} else {
 				logger::warn("[DLSSNR] skin mask: MASKS SRV unavailable, DLSSNR output kept as-is");
