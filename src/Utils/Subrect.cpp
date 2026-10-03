@@ -154,13 +154,16 @@ namespace Util::Subrect
 		if (stereoEnabled && hasExplicitLeft && !hasExplicitRight) {
 			SyncRightUV();
 		}
-		if (stereoEnabled) {
-			stereoOffsetLeftX = a_json.value("StereoOffsetLeftX", a_json.value("StereoOffsetX", 0.0f));
-			stereoOffsetLeftY = a_json.value("StereoOffsetLeftY", a_json.value("StereoOffsetY", 0.0f));
-			stereoOffsetRightX = a_json.value("StereoOffsetRightX", a_json.value("StereoOffsetX", 0.0f));
-			stereoOffsetRightY = a_json.value("StereoOffsetRightY", a_json.value("StereoOffsetY", 0.0f));
-			ApplyStereoOffset();
-		}
+		// Stereo offsets load unconditionally: LoadSettings runs before
+		// SetStereoEnabled(true) (PostPostLoad), so gating on stereoEnabled
+		// here would drop persisted Binocular Alignment values on every boot.
+		// ApplyStereoOffset is safe with stereo off — the offset UVs are
+		// simply unused until stereo engages.
+		stereoOffsetLeftX = a_json.value("StereoOffsetLeftX", a_json.value("StereoOffsetX", 0.0f));
+		stereoOffsetLeftY = a_json.value("StereoOffsetLeftY", a_json.value("StereoOffsetY", 0.0f));
+		stereoOffsetRightX = a_json.value("StereoOffsetRightX", a_json.value("StereoOffsetX", 0.0f));
+		stereoOffsetRightY = a_json.value("StereoOffsetRightY", a_json.value("StereoOffsetY", 0.0f));
+		ApplyStereoOffset();
 
 		if (a_json.contains("SelectedPresetIndex")) {
 			selectedPresetIndex = a_json["SelectedPresetIndex"];
@@ -262,6 +265,11 @@ namespace Util::Subrect
 		if (stereoEnabled && !rightUVLoadedFromJson) {
 			SyncRightUV();
 		}
+		// Re-derive the offset UVs: SyncRightUV may have changed currentRightUV
+		// (auto-mirror), and LoadSettings may have populated the stereo offsets
+		// while stereo was still off. Without this, offsetRightUV stays stale
+		// until the next SetStereoOffset/ClampCurrentUV.
+		ApplyStereoOffset();
 	}
 
 	void Controller::DrawEditor(ID3D11ShaderResourceView* previewSrv, ID3D11Texture2D* previewTexture, float uvVisibleWidth, float uvStartX, ImDrawCallback imageRenderCallback)
