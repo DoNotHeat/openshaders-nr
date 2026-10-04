@@ -772,12 +772,13 @@ void FoveatedRender::DrawSettings()
 						"neural effect, black = untouched pixels. Use this to verify mask coverage before judging the blend."));
 				}
 				custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_mask_erode"), "Mask Erosion"),
-					&settings.neuralRenderingMaskErodePx, 0.0f, 8.0f, "%.1f px");
+					&settings.neuralRenderingMaskErodePx, -8.0f, 8.0f, "%.1f px");
 				if (auto _tt = Util::HoverTooltipWrapper()) {
 					ImGui::Text("%s", T(TKEY("neural_rendering_mask_erode_tooltip"),
-						"Shrinks the character mask before blending so the neural edge lands inside the character "
-						"instead of on the silhouette boundary. The raw mask edge shimmers under camera motion; "
-						"erosion removes that halo. 0 disables (raw mask)."));
+						"Adjusts the character mask before blending. Positive values shrink the mask so the neural "
+						"edge lands inside the character instead of on the silhouette boundary (removes the shimmering "
+						"halo under camera motion). Negative values grow the mask outward so a mask that under-covers "
+						"the character edge never leaves edge pixels flickering. 0 uses the raw mask."));
 				}
 			}
 			ImGui::Separator();

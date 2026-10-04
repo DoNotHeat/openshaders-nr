@@ -70,28 +70,30 @@ float MaskValue(uint2 colorPixel, uint2 maskDims)
 	return FaceMask.SampleLevel(MaskSampler, maskUV, 0).y;
 }
 
-// Eroded mask sample: the minimum of the bilinear mask over a cross of
-// neighbors spanning erodePx display pixels. A binary mask's bilinear edge
-// gradient is only ~1px wide, so a boundary pixel's weight oscillates between
-// original and neural output as the camera moves — a shimmering silhouette.
-// Taking the min over the cross pulls the blend edge inside the character onto
-// stable pixels; the silhouette itself stays original. The cross (not a box)
-// keeps the cost at 5 samples regardless of erodePx.
-float ErodedMaskValue(uint2 colorPixel, uint2 maskDims)
+// Adjusted mask sample: the minimum (erosion) or maximum (dilation) of the
+// bilinear mask over a cross of neighbors spanning |maskErodePx| display
+// pixels. A binary mask's bilinear edge gradient is only ~1px wide, so a
+// boundary pixel's weight oscillates between original and neural output as the
+// camera moves — a shimmering silhouette. Erosion (positive) pulls the blend
+// edge inside the character onto stable pixels; dilation (negative) extends it
+// slightly outside so an under-covering mask never leaves edge pixels
+// flickering. The cross (not a box) keeps the cost at 5 samples regardless of
+// the radius.
+float AdjustedMaskValue(uint2 colorPixel, uint2 maskDims)
 {
-	if (maskErodePx <= 0.0f)
+	if (maskErodePx == 0.0f)
 		return MaskValue(colorPixel, maskDims);
 
-	const float2 step = float2(maskErodePx, maskErodePx);
+	const float2 step = float2(abs(maskErodePx), abs(maskErodePx));
 	// int2 arithmetic so negative offsets stay valid; SampleLevel clamps the
 	// resulting UV to the texture edge (CLAMP addressing), so out-of-bounds
 	// neighbors read the border mask value instead of wrapping.
 	const int2 center = int2(colorPixel);
 	float m = MaskValue(colorPixel, maskDims);
-	m = min(m, MaskValue(uint2(center + int2(step.x, 0)), maskDims));
-	m = min(m, MaskValue(uint2(center - int2(step.x, 0)), maskDims));
-	m = min(m, MaskValue(uint2(center + int2(0, step.y)), maskDims));
-	m = min(m, MaskValue(uint2(center - int2(0, step.y)), maskDims));
+	m = (maskErodePx > 0.0f) ? min(m, MaskValue(uint2(center + int2(step.x, 0)), maskDims)) : max(m, MaskValue(uint2(center + int2(step.x, 0)), maskDims));
+	m = (maskErodePx > 0.0f) ? min(m, MaskValue(uint2(center - int2(step.x, 0)), maskDims)) : max(m, MaskValue(uint2(center - int2(step.x, 0)), maskDims));
+	m = (maskErodePx > 0.0f) ? min(m, MaskValue(uint2(center + int2(0, step.y)), maskDims)) : max(m, MaskValue(uint2(center + int2(0, step.y)), maskDims));
+	m = (maskErodePx > 0.0f) ? min(m, MaskValue(uint2(center - int2(0, step.y)), maskDims)) : max(m, MaskValue(uint2(center - int2(0, step.y)), maskDims));
 	return m;
 }
 
@@ -124,13 +126,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 	uint2 maskDims;
 	FaceMask.GetDimensions(maskDims.x, maskDims.y);
 
-	// Eroded bilinear sample — 5 samples per pixel (center + cross), not a full
+	// Adjusted bilinear sample — 5 samples per pixel (center + cross), not a full
 	// neighborhood loop. The character-mask boundary sits on the silhouette where
 	// the transition is far less visible than it was on the face outline, and the
-	// erosion + ramp already give a soft edge inside the character. A per-pixel
+	// erosion/dilation + ramp already give a soft edge. A per-pixel
 	// erosion/dilation loop over the full frame (up to ~28 samples per pixel x
 	// ~33M pixels in VR) costs several ms and is not needed.
-	float mask = ErodedMaskValue(dispatchThreadID.xy, maskDims);
+	float mask = AdjustedMaskValue(dispatchThreadID.xy, maskDims);
 
 	float weight = saturate(mask * max(rampScale, 1e-4));
 

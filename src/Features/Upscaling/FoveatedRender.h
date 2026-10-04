@@ -129,12 +129,14 @@ struct FoveatedRender
 		// Dev: render the face-mask weight instead of the composite to verify
 		// coverage. Only read when neuralRenderingSkinMaskOnly is on.
 		bool neuralRenderingSkinMaskDebug = false;
-		// Erode the character mask by this many pixels before blending. The raw
+		// Adjust the character mask by this many pixels before blending. The raw
 		// mask is binary (0/1) and its bilinear edge gradient shifts with camera
 		// motion, so boundary pixels oscillate between original and neural output
-		// — a shimmering silhouette. Erosion pulls the blend edge inside the
-		// character onto stable pixels; the silhouette itself stays original.
-		float neuralRenderingMaskErodePx = 2.0f;  // [0, 8]
+		// — a shimmering silhouette. Positive values erode: the blend edge moves
+		// inside the character onto stable pixels. Negative values dilate: the
+		// blend edge extends slightly outside the silhouette so a mask that
+		// under-covers the character edge never leaves edge pixels flickering.
+		float neuralRenderingMaskErodePx = 2.0f;  // [-8, 8]
 		// Gameplay gating: skip the whole DLSSNR pass while the player sprints —
 		// the neural detail is barely visible at sprint speed and the pass costs
 		// real GPU time exactly when frames matter most. Runtime toggle.
