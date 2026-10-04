@@ -63,7 +63,7 @@ namespace NeuralRendering
 			float maskScaleX;
 			float maskScaleY;
 			float rampScale;
-			float pad0;
+			float maskErodePx;
 			std::uint32_t debugVisualize;
 			float pad2;
 			float neuralBoxScaleX;
@@ -167,10 +167,10 @@ namespace NeuralRendering
 			return false;
 		}
 
-		/// Face-mask gated write-back for one whole SBS frame. Reads the pristine
+		/// Character-mask gated write-back for one whole SBS frame. Reads the pristine
 		/// pre-evaluate copy and the current (DLSSNR-evaluated) kTOTAL, and writes
-		/// the mask-blended result into the composite target. Where the face mask
-		/// (GBuffer Masks.y) is set, the frame blends toward the DLSSNR result;
+		/// the mask-blended result into the composite target. Where the character
+		/// mask (GBuffer Masks.y) is set, the frame blends toward the DLSSNR result;
 		/// elsewhere the original pixels are kept. Outside the foveal subrects the
 		/// neural input equals the original, so the blend is a no-op there
 		/// regardless of the mask. The neural box stretch params (box scale/origins)
@@ -179,7 +179,7 @@ namespace NeuralRendering
 			ID3D11ShaderResourceView* originalSRV, ID3D11ShaderResourceView* neuralSRV,
 			ID3D11UnorderedAccessView* dstUAV,
 			float maskWidth, float maskHeight, std::uint32_t colorW, std::uint32_t colorH,
-			bool debugVisualize,
+			bool debugVisualize, float maskErodePx,
 			float neuralBoxScaleX, float neuralBoxScaleY,
 			float neuralBoxOffsetX, float neuralBoxOffsetY, float neuralBoxOffsetXRight)
 		{
@@ -197,6 +197,7 @@ namespace NeuralRendering
 			cbData.maskScaleX = maskWidth / static_cast<float>(colorW);
 			cbData.maskScaleY = maskHeight / static_cast<float>(colorH);
 			cbData.rampScale = 2.0f;
+			cbData.maskErodePx = maskErodePx;
 			cbData.debugVisualize = debugVisualize ? 1u : 0u;
 			cbData.neuralBoxScaleX = neuralBoxScaleX;
 			cbData.neuralBoxScaleY = neuralBoxScaleY;
@@ -409,6 +410,15 @@ namespace NeuralRendering
 		if (lastAppliedFrame == frame || (guideFrame != frame && !(frame > 0 && guideFrame == frame - 1)))
 			return false;
 
+		const auto now = std::chrono::steady_clock::now();
+
+		// Gameplay gate: fade the intensity out over neuralRenderingFadeOutSeconds,
+		// then skip the pass entirely. 0 = skip instantly (legacy hard cut).
+		// Checked before the character-mask skip so a sprint/combat gate keeps the
+		// pass off even when an NPC walks into frame — otherwise the fade-out would
+		// restart from full intensity the moment a character appears.
+		const bool gateActive = ShouldSkipForGameplayGate(foveated, frame);
+
 		// Character-mask skip: with the mask on and no in-range character drawn this
 		// frame, the DLSSNR result would be invisible everywhere — skip the evaluate
 		// (the expensive part) entirely. The NGX feature keeps its temporal history
@@ -422,12 +432,6 @@ namespace NeuralRendering
 			lastAppliedFrame = frame;
 			return true;
 		}
-
-		const auto now = std::chrono::steady_clock::now();
-
-		// Gameplay gate: fade the intensity out over neuralRenderingFadeOutSeconds,
-		// then skip the pass entirely. 0 = skip instantly (legacy hard cut).
-		const bool gateActive = ShouldSkipForGameplayGate(foveated, frame);
 		const float fadeOutSeconds = foveated.settings.neuralRenderingFadeOutSeconds;
 		if (gateActive) {
 			if (fadeOutSeconds <= 0.0f) {
@@ -663,6 +667,7 @@ namespace NeuralRendering
 						static_cast<float>(masksDesc.Width), static_cast<float>(masksDesc.Height),
 						totalDesc.Width, totalDesc.Height,
 						foveated.settings.neuralRenderingSkinMaskDebug,
+						foveated.settings.neuralRenderingMaskErodePx,
 						boxScaleX, boxScaleY, boxOffsetXLeft, boxOffsetY, boxOffsetXRight)) {
 					context->CopyResource(Util::AsReal(total.texture), compositeColor->resource.get());
 				}

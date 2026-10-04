@@ -4,11 +4,12 @@
 //
 // DLSSNR (NGX Feature 18) evaluates the whole region it is given (flat
 // framebuffer or VR foveated subrect), but the desired behaviour is to keep
-// its output ONLY on face/skin pixels. This pass blends the evaluated color
-// with the original frame using the face mask written by the lighting pass:
+// its output ONLY on character pixels. This pass blends the evaluated color
+// with the original frame using the character mask written by the lighting
+// pass:
 //
-//   Masks.y == 1.0   human face	  -> full DLSSNR output
-//   Masks.y == 0.5   beast face	  -> full DLSSNR output
+//   Masks.y == 1.0   character geometry (face, skin, clothing, hair, armour)
+//                    -> full DLSSNR output
 //   Masks.y == 0.0   everything else     -> original color
 //
 // A soft falloff around the 0.25 threshold feathers the boundary so the
@@ -36,10 +37,16 @@ cbuffer SkinMaskParams : register(b0)
 	// being composited is the whole frame and the pixels the effect actually hit
 	// are already restricted to the foveal subrects by the DLSSNR write-back.
 	float2 maskScale;     // renderPixels per displayPixel (maskW/frameW, maskH/frameH)
-	float rampScale;      // weight = saturate(mask * rampScale). 2.0 maps 0->0, 0.5 (body/
-			      // beast face)->1, 1 (human face)->1, and spreads bilinear edge
-			      // intermediates (0..0.5) into a soft feather; lower = wider feather.
-	float pad;	    // reserved; keeps debugVisualize at offset 16 (matches SkinMaskCB)
+	float rampScale;      // weight = saturate(mask * rampScale). 2.0 maps 0->0, 0.5 (beast
+			      // face)->1, 1 (human face / non-FaceGen character)->1, and spreads
+			      // bilinear edge intermediates (0..0.5) into a soft feather; lower =
+			      // wider feather.
+	float maskErodePx;    // erode the mask by this many display pixels before blending.
+			      // The raw binary mask's bilinear edge gradient shifts with camera
+			      // motion, so boundary pixels oscillate between original and neural
+			      // output (shimmering silhouette). Erosion pulls the blend edge
+			      // inside the character onto stable pixels; the silhouette itself
+			      // stays original. 0 disables.
 	uint debugVisualize;  // dev: output the mask weight instead of the composite
 	float pad2;
 	// Neural render-scale: the DLSSNR result for each eye's foveal subrect lands
@@ -61,6 +68,31 @@ float MaskValue(uint2 colorPixel, uint2 maskDims)
 	// scale (both SBS spaces share origin 0,0), then bilinear-read the mask.
 	float2 maskUV = (colorPixel + 0.5) * maskScale / maskDims;
 	return FaceMask.SampleLevel(MaskSampler, maskUV, 0).y;
+}
+
+// Eroded mask sample: the minimum of the bilinear mask over a cross of
+// neighbors spanning erodePx display pixels. A binary mask's bilinear edge
+// gradient is only ~1px wide, so a boundary pixel's weight oscillates between
+// original and neural output as the camera moves — a shimmering silhouette.
+// Taking the min over the cross pulls the blend edge inside the character onto
+// stable pixels; the silhouette itself stays original. The cross (not a box)
+// keeps the cost at 5 samples regardless of erodePx.
+float ErodedMaskValue(uint2 colorPixel, uint2 maskDims)
+{
+	if (maskErodePx <= 0.0f)
+		return MaskValue(colorPixel, maskDims);
+
+	const float2 step = float2(maskErodePx, maskErodePx);
+	// int2 arithmetic so negative offsets stay valid; SampleLevel clamps the
+	// resulting UV to the texture edge (CLAMP addressing), so out-of-bounds
+	// neighbors read the border mask value instead of wrapping.
+	const int2 center = int2(colorPixel);
+	float m = MaskValue(colorPixel, maskDims);
+	m = min(m, MaskValue(uint2(center + int2(step.x, 0)), maskDims));
+	m = min(m, MaskValue(uint2(center - int2(step.x, 0)), maskDims));
+	m = min(m, MaskValue(uint2(center + int2(0, step.y)), maskDims));
+	m = min(m, MaskValue(uint2(center - int2(0, step.y)), maskDims));
+	return m;
 }
 
 float4 NeuralSample(uint2 colorPixel, uint2 frameDims)
@@ -92,12 +124,13 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID)
 	uint2 maskDims;
 	FaceMask.GetDimensions(maskDims.x, maskDims.y);
 
-	// Single bilinear sample — no neighborhood loop. The character-mask boundary
-	// sits on the silhouette where the transition is far less visible than it was
-	// on the face outline, and the bilinear gradient + ramp already give a soft
-	// edge. A per-pixel erosion/dilation loop over the full frame (up to ~28
-	// samples per pixel x ~33M pixels in VR) costs several ms and is not needed.
-	float mask = MaskValue(dispatchThreadID.xy, maskDims);
+	// Eroded bilinear sample — 5 samples per pixel (center + cross), not a full
+	// neighborhood loop. The character-mask boundary sits on the silhouette where
+	// the transition is far less visible than it was on the face outline, and the
+	// erosion + ramp already give a soft edge inside the character. A per-pixel
+	// erosion/dilation loop over the full frame (up to ~28 samples per pixel x
+	// ~33M pixels in VR) costs several ms and is not needed.
+	float mask = ErodedMaskValue(dispatchThreadID.xy, maskDims);
 
 	float weight = saturate(mask * max(rampScale, 1e-4));
 

@@ -334,7 +334,7 @@ public:
 		// Permutation::ExtraFlags::IsCharacter in package/Shaders/Common/Permutation.hlsli.
 		IsCharacter = 1u << 28,
 		IsCharacterRainSurface = 1u << 30,
-		IsHeldWeapon = 1u << 28
+		IsHeldWeapon = 1u << 29
 	};
 
 	/** @brief Bitflags describing extra feature-specific properties related to terrain displacement and material models. */

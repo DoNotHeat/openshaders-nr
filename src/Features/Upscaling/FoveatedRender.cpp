@@ -47,6 +47,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	neuralRenderingSkinMaskOnly,
 	neuralRenderingCharacterRange,
 	neuralRenderingSkinMaskDebug,
+	neuralRenderingMaskErodePx,
 	neuralRenderingDisableWhileSprinting,
 	neuralRenderingDisableWhileRunning,
 	neuralRenderingDisableWhileSneaking,
@@ -769,6 +770,14 @@ void FoveatedRender::DrawSettings()
 					ImGui::Text("%s", T(TKEY("neural_rendering_skin_mask_debug_tooltip"),
 						"Renders the character mask instead of the composite: green = character pixels receiving the "
 						"neural effect, black = untouched pixels. Use this to verify mask coverage before judging the blend."));
+				}
+				custom |= ImGui::SliderFloat(T(TKEY("neural_rendering_mask_erode"), "Mask Erosion"),
+					&settings.neuralRenderingMaskErodePx, 0.0f, 8.0f, "%.1f px");
+				if (auto _tt = Util::HoverTooltipWrapper()) {
+					ImGui::Text("%s", T(TKEY("neural_rendering_mask_erode_tooltip"),
+						"Shrinks the character mask before blending so the neural edge lands inside the character "
+						"instead of on the silhouette boundary. The raw mask edge shimmers under camera motion; "
+						"erosion removes that halo. 0 disables (raw mask)."));
 				}
 			}
 			ImGui::Separator();

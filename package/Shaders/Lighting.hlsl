@@ -3380,14 +3380,14 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	float masksZ = Color::RGBToYCoCg(directionalAmbientColor).x;
 
 #		if defined(SKIN)
-	// Masks.y encodes the face profile for SSS and the DLSSNR skin mask:
-	//   1.0 = human face (SSS human profile + DLSSNR skin mask)
+	// Masks.y encodes the face profile for SSS and the DLSSNR character mask:
+	//   1.0 = human face (SSS human profile + DLSSNR character mask)
 	//   0.5 = beast face (SSS beast profile, still a face for DLSSNR)
 	//   0.0 = not a face (the else-branch below)
 	// SKIN is defined for FaceGen technique draws regardless of whether the SSS
-	// feature is enabled, so the DLSSNR face mask does not depend on SSS.
+	// feature is enabled, so the DLSSNR character mask does not depend on SSS.
 	// Consumers: SeparableSSSCS.hlsl uses > 0.75 for the human profile;
-	// NeuralRendering::SkinMaskCompositeCS uses > 0.25 for the skin mask.
+	// NeuralRendering::SkinMaskCompositeCS uses > 0.25 for the character mask.
 	const float faceProfile = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsBeastRace) ? 0.5 : 1.0;
 #			if defined(SSS)
 	psout.Masks = float4(saturate(baseColor.a), faceProfile, masksZ, psout.Diffuse.w);
@@ -3395,7 +3395,12 @@ PS_OUTPUT main(PS_INPUT input, bool frontFace : SV_IsFrontFace)
 	psout.Masks = float4(0, faceProfile, masksZ, psout.Diffuse.w);
 #			endif
 #		else
-	psout.Masks = float4(0, 0, masksZ, psout.Diffuse.w);
+	// Non-FaceGen character geometry (clothing, hair, armour) still carries the
+	// DLSSNR character mask via Masks.y = 1.0 when the IsCharacter bit is set,
+	// so the neural effect covers the whole character, not just skin. SSS is
+	// unaffected: it gates on Masks.x (0 here), not Masks.y.
+	const float characterMask = (Permutation::ExtraShaderDescriptor & Permutation::ExtraFlags::IsCharacter) ? 1.0 : 0.0;
+	psout.Masks = float4(0, characterMask, masksZ, psout.Diffuse.w);
 #		endif
 
 	// Stored as 1 - vertexAO so the cleared default (0) means no occlusion

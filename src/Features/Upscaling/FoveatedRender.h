@@ -118,9 +118,9 @@ struct FoveatedRender
 		bool neuralRenderingAutoMask = true;
 		bool neuralRenderingUICorrection = false;
 		// Gate the DLSSNR write-back to character pixels via the GBuffer character
-		// mask (Masks.y written by the lighting pass for skinned actor geometry).
-		// Rest of the frame keeps the original pixels, so the neural effect is
-		// limited to characters. Runtime toggle.
+		// mask (Masks.y written by the lighting pass for skinned actor geometry —
+		// face, skin, clothing, hair, armour). Rest of the frame keeps the original
+		// pixels, so the neural effect is limited to characters. Runtime toggle.
 		bool neuralRenderingSkinMaskOnly = false;
 		// When the nearest character is beyond this range (world units, ~feet), the
 		// whole DLSSNR pass is skipped like the no-character case. 0 disables
@@ -129,6 +129,12 @@ struct FoveatedRender
 		// Dev: render the face-mask weight instead of the composite to verify
 		// coverage. Only read when neuralRenderingSkinMaskOnly is on.
 		bool neuralRenderingSkinMaskDebug = false;
+		// Erode the character mask by this many pixels before blending. The raw
+		// mask is binary (0/1) and its bilinear edge gradient shifts with camera
+		// motion, so boundary pixels oscillate between original and neural output
+		// — a shimmering silhouette. Erosion pulls the blend edge inside the
+		// character onto stable pixels; the silhouette itself stays original.
+		float neuralRenderingMaskErodePx = 2.0f;  // [0, 8]
 		// Gameplay gating: skip the whole DLSSNR pass while the player sprints —
 		// the neural detail is barely visible at sprint speed and the pass costs
 		// real GPU time exactly when frames matter most. Runtime toggle.
