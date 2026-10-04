@@ -31,11 +31,6 @@
 
 #define I18N_KEY_PREFIX "feature.upscaling."
 
-namespace NR
-{
-	NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Tuning, intensity, localToneStrength, localStructureStrength, skinStructureStrength, style, useAutoMask);
-}
-
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	Upscaling::Settings,
 	upscaleMethod,
