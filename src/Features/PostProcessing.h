@@ -6,6 +6,7 @@
 #include "PostProcessing/Border.h"
 #include "PostProcessing/CODBloom.h"
 #include "PostProcessing/Camera.h"
+#include "PostProcessing/CinematicCamera.h"
 #include "PostProcessing/ColorGrading.h"
 #include "PostProcessing/Composite.h"
 #include "PostProcessing/DoF.h"
@@ -67,6 +68,9 @@ struct PostProcessing : Feature
 	/** Reapplies overrides for the entire feature or selected subfeature. */
 	virtual bool ReapplyCurrentPageOverrideSettings() override;
 
+	/** @brief Reports whether scene exposure is published and its luminance range and compensation. */
+	virtual json GetDiagnostics() override;
+
 	/**
 	 * @brief Whether Post Processing wants to replace the vanilla tonemap this frame.
 	 *
@@ -92,6 +96,9 @@ struct PostProcessing : Feature
 	 * when another feature produced the image.
 	 */
 	Settings GetCommonBufferData() const;
+
+	/** @brief Publishes Composite's auto exposure whenever the Post Processing pipeline runs. */
+	virtual bool GetSceneExposure(SceneExposure& a_out) const override;
 
 	json pendingSettings = {};
 
@@ -136,6 +143,27 @@ struct PostProcessing : Feature
 	size_t activePipelineFeature = 0;
 
 	BokehResources bokehResources;
+	CinematicCamera::Controller cinematicCamera;
+
+	/// Current physical camera overrides, or null while inactive.
+	const CinematicCamera::PhysicalCameraState* GetActivePhysicalCameraState() const { return cinematicCamera.GetState(); }
+	/// Controller shared by the linked post processing effects.
+	CinematicCamera::Controller& GetCinematicCamera() { return cinematicCamera; }
+	/// Fullscreen triangle shader used by raster post processing stages.
+	ID3D11VertexShader* GetFullscreenVS() const { return fullscreenVS.get(); }
+	/** @brief Texture description shared by effects at the post-processing input resolution. */
+	D3D11_TEXTURE2D_DESC GetPipelineTextureDesc() const { return pipelineTextureDesc; }
+	/** @brief Whether the pipeline processes a scene published by another feature instead of the engine target. */
+	bool ProcessesProvidedInput() const { return inputProvider != nullptr; }
+
+	using Gamut = PostProcessFeature::Gamut;
+	struct alignas(16) CopyCB
+	{
+		Gamut inputGamut = Gamut::Rec709;
+		Gamut outputGamut = Gamut::Rec709;
+		float gamma = 1.0f;
+		uint resample = 0;
+	};
 
 	template <typename T>
 	T* GetPipelineFeature(FeaturePipelineIndex idx)
@@ -143,25 +171,37 @@ struct PostProcessing : Feature
 		return static_cast<T*>(pipeline[static_cast<size_t>(idx)].get());
 	}
 
+	template <typename T>
+	const T* GetPipelineFeature(FeaturePipelineIndex idx) const
+	{
+		return static_cast<const T*>(pipeline[static_cast<size_t>(idx)].get());
+	}
+
 	virtual void ClearShaderCache() override;
 
 	virtual void SetupResources() override;
 	virtual void Reset() override;
+	/** @brief Restores the camera-owned FOV when post processing is disabled at runtime. */
+	virtual void OnRuntimeDisabled() override { cinematicCamera.Update(false, 1.0f); }
 
 	virtual void PostPostLoad() override;
 	virtual void Prepass() override;
 
 	void PreProcess(RE::RENDER_TARGET a_input, RE::RENDER_TARGET a_output);
+	/** @brief Publishes the processed scene until the next pipeline invocation, frame reset, or resource setup. */
+	ID3D11ShaderResourceView* GetPostProcessingOutput() const override { return postProcessingOutput; }
 	void DrawBeforeUpscaling();
 	void ClearBorderMotionVectorsForFrameGen();
 	void DrawFeature(PostProcessFeature& feature, PostProcessFeature::TextureInfo& lastTexColor);
 
-	/// Copy lastTexColor to a render target, performing format conversion via copyCS if needed.
+	/// Copy pipeline output, converting its format, gamut and encoding as needed.
 	void CopyToRenderTarget(
 		RE::BSGraphics::RenderTargetData& targetRT,
 		Texture2D* convertTex,
 		ID3D11Texture2D* srcTex,
-		ID3D11ShaderResourceView* srcSRV);
+		ID3D11ShaderResourceView* srcSRV, const CopyCB& conversion);
+	/// Match the pipeline resolution, decoding scene color when requested.
+	void BeginLinearProcessing(PostProcessFeature::TextureInfo& texture, bool scene = true);
 
 	/////////////////////////////////////////////////////////////////////////////////
 
@@ -177,8 +217,12 @@ struct PostProcessing : Feature
 
 	eastl::unique_ptr<Texture2D> texCopyMain = nullptr;
 	eastl::unique_ptr<Texture2D> texCopyMainCopy = nullptr;
-	eastl::unique_ptr<Texture2D> texAfterTAA = nullptr;
-	winrt::com_ptr<ID3D11ComputeShader> copyCS = nullptr;
+	std::unique_ptr<Texture2D> texInput;
+	std::unique_ptr<Texture2D> texOutput;
+	std::unique_ptr<ConstantBuffer> copyCB;
+	winrt::com_ptr<ID3D11SamplerState> copySampler;
+	winrt::com_ptr<ID3D11VertexShader> fullscreenVS;
+	winrt::com_ptr<ID3D11PixelShader> copyPS;
 
 	/////////////////////////////////////////////////////////////////////////////////
 
@@ -195,6 +239,24 @@ struct PostProcessing : Feature
 	};
 
 private:
+	struct PipelineResources
+	{
+		decltype(pipeline) effects;
+		std::unique_ptr<Texture2D> input;
+		std::unique_ptr<Texture2D> output;
+		D3D11_TEXTURE2D_DESC desc{};
+	} alternatePipeline;
+	void CreatePipelineResources(bool fallback);
+	void SwapPipelineResources();
+	bool SelectPipelineResources(ID3D11Texture2D* texture);
+	bool resourcesReady = false;
+	bool IsPipelineReady() const { return resourcesReady && fullscreenVS && copyPS; }
+	Feature* inputProvider = nullptr;
+	D3D11_TEXTURE2D_DESC pipelineTextureDesc{};
+	ID3D11ShaderResourceView* postProcessingOutput = nullptr;
+	void DrawCopy(Texture2D& target, ID3D11Texture2D* source, ID3D11ShaderResourceView* srv, CopyCB conversion);
+	void SaveActiveSettings(json& o_json);
+	void CompileCopyShaders();
 	bool ApplyPendingSettings();
 	bool HasActivePipelineFeature() const;
 	void RestorePipelineDefaultEnablement();

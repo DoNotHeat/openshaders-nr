@@ -27,6 +27,8 @@ cbuffer BlendCB : register(b0)
 	float OuterWidth;      // Outer feather band width in pixels (mode 2)
 	uint BandX;            // Dispatch padding in X (outer band size)
 	uint BandY;            // Dispatch padding in Y
+	uint MaskMode;         // Mask shape: 0 = Rectangle, 1 = Oval
+	float FalloffCurve;    // 0.5 = earlier falloff, 1 = balanced, 2 = later falloff
 	float _pad0;
 }
 
@@ -60,6 +62,29 @@ float EdgeDistance(float2 pos)
 	float dx = extentX - abs(pos.x + 0.5 - extentX);
 	float dy = extentY - abs(pos.y + 0.5 - extentY);
 	return min(dx, dy);
+}
+
+static const float kMinGradientLength = 1e-5;
+
+// First-order ellipse SDF: the implicit value divided by its gradient gives a
+// pixel-space distance, so an elongated oval keeps an even transition width.
+float EllipseEdgeDistance(float2 offset, float2 radii)
+{
+	float2 safeRadii = max(radii, float2(0.5, 0.5));
+	float2 inverseRadiiSquared = 1.0 / (safeRadii * safeRadii);
+	float ellipseValue = 1.0 - dot(offset * offset, inverseRadiiSquared);
+	float2 gradient = 2.0 * offset * inverseRadiiSquared;
+	float gradientLength = length(gradient);
+	if (gradientLength < kMinGradientLength)
+		return min(safeRadii.x, safeRadii.y);
+
+	float distance = ellipseValue / gradientLength;
+	return clamp(distance, -max(safeRadii.x, safeRadii.y), min(safeRadii.x, safeRadii.y));
+}
+
+float ShapeRamp(float normalizedDistance, float curve)
+{
+	return pow(saturate(normalizedDistance), curve);
 }
 
 [numthreads(8, 8, 1)] void main(uint3 tid : SV_DispatchThreadID) {
@@ -117,7 +142,7 @@ float EdgeDistance(float2 pos)
 
 	float4 dlss = SrcTex.Load(int3(srcU, 0));
 
-	// Distance from nearest edge of the SUBRECT in subrect-local pixel space.
+	// Distance from the selected mask edge in subrect-local pixel space.
 	//
 	// Bot-flagged Major bug (CodeRabbit + Copilot on the original PR): the
 	// previous implementation used `srcPos.x` for distL/distR. In Extreme
@@ -125,17 +150,21 @@ float EdgeDistance(float2 pos)
 	// concatenated SBS strip), so srcPos.x = tid.x + SrcOffsetX could exceed
 	// SubWidth, making distR negative and breaking the feather band entirely
 	// — the strip would never blend correctly with the background. Use the
-	// dispatch-local coordinates so distances are in [0, SubWidth-1] regardless
+// dispatch-local coordinates so distances are in [0, SubWidth-1] regardless
 	// of the source-side offset.
-	float distL = (float)base.x;
-	float distR = (float)(SubWidth - 1 - base.x);
-	float distT = (float)base.y;
-	float distB = (float)(SubHeight - 1 - base.y);
-
 	float edgeDist;
-	if (Roundness > 0.0) {
+	if (MaskMode == 1) {
+		// Ellipse tangent to the subrect at each edge midpoint; evaluating pixel
+		// centers keeps the first and last rows and columns symmetric.
+		float2 halfExtent = 0.5 * float2((float)SubWidth, (float)SubHeight);
+		edgeDist = EllipseEdgeDistance(float2(base) + 0.5 - halfExtent, halfExtent);
+	} else if (Roundness > 0.0) {
 		edgeDist = max(EdgeDistance(float2(base)), 0.0);
 	} else {
+		float distL = (float)base.x;
+		float distR = (float)(SubWidth - 1 - base.x);
+		float distT = (float)base.y;
+		float distB = (float)(SubHeight - 1 - base.y);
 		edgeDist = min(min(distL, distR), min(distT, distB));
 	}
 
@@ -144,6 +173,10 @@ float EdgeDistance(float2 pos)
 		DstTex[dstPos] = dlss;
 		return;
 	}
+	// Outside the mask, leave the stretched background untouched. Without this
+	// guard, dither noise leaks DLSS pixels into the oval's corners.
+	if (MaskMode == 1 && edgeDist <= 0.0)
+		return;
 
 	// We're in the feather band — need background
 	float4 bg = DstTex[dstPos];
@@ -153,11 +186,12 @@ float EdgeDistance(float2 pos)
 		// Noise shifts the blend threshold per-pixel → natural irregular boundary
 		float t = edgeDist / FeatherWidth;  // 0 at edge, 1 at band end
 		float noise = BlueNoise(srcPos, FrameIndex);
-		float alpha = saturate(t + (noise - 0.5) * DitherStrength);
+		float alpha = saturate(ShapeRamp(t, FalloffCurve) + (noise - 0.5) * DitherStrength);
 		DstTex[dstPos] = lerp(bg, dlss, alpha);
 	} else {
-		// Feather (default): smooth alpha ramp
-		float alpha = smoothstep(0.0, FeatherWidth, edgeDist);
+		// Feather (default): tunable smooth alpha ramp
+		float ramp = ShapeRamp(edgeDist / FeatherWidth, FalloffCurve);
+		float alpha = ramp * ramp * (3.0 - 2.0 * ramp);
 		DstTex[dstPos] = lerp(bg, dlss, alpha);
 	}
 }

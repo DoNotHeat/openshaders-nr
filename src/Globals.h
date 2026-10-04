@@ -8,6 +8,7 @@
 
 struct CloudShadows;
 struct CloudRelight;
+struct ProceduralSun;
 struct DynamicCubemaps;
 struct VolumetricShadows;
 struct ExtendedMaterials;
@@ -45,6 +46,7 @@ struct Upscaling;
 class Profiler;
 struct CSEditor;
 struct CSUtility;
+struct Wind;
 struct FeatureOverwrites;
 #if defined(ENABLE_EFFECTS11)
 struct Effects11;
@@ -108,6 +110,7 @@ namespace globals
 	{
 		extern CloudShadows cloudShadows;
 		extern CloudRelight cloudRelight;
+		extern ProceduralSun proceduralSun;
 		extern DynamicCubemaps dynamicCubemaps;
 		extern VolumetricShadows volumetricShadows;
 		extern ExtendedMaterials extendedMaterials;
@@ -151,6 +154,7 @@ namespace globals
 		extern ScreenshotFeature screenshotFeature;
 		extern CSEditor csEditor;
 		extern CSUtility csUtility;
+		extern Wind wind;
 		extern FeatureOverwrites featureOverwrites;
 		extern ExponentialHeightFog exponentialHeightFog;
 		extern TruePBR truePBR;
@@ -292,6 +296,7 @@ namespace globals
 		extern RE::BSUtilityShader* utilityShader;
 		extern RE::PlayerCharacter* player;
 		extern RE::PlayerCamera* playerCamera;
+		extern RE::MenuTopicManager* menuTopicManager;
 		extern RE::Sky* sky;
 		extern RE::UI* ui;
 		extern RE::Calendar* calendar;

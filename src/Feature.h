@@ -14,6 +14,9 @@
 #	include <Tracy/TracyD3D11.hpp>
 #endif
 
+struct ID3D11ShaderResourceView;
+struct ID3D11Texture2D;
+
 struct Feature
 {
 	// For global settings search
@@ -47,7 +50,9 @@ struct Feature
 	// True if any restart-gated setting's live value differs from the
 	// boot-latched value. Drives the green "RestartNeeded" tint in the
 	// feature list and the `pending` flag in MCP's `list` response.
-	bool HasAnyPendingRestart() const
+	// Virtual so a feature with a non-settings restart trigger (e.g.
+	// Upscaling's live HMD-size drift) can OR in its own condition.
+	virtual bool HasAnyPendingRestart() const
 	{
 		const auto fields = GetRestartRequiredFields();
 		if (fields.empty())
@@ -202,6 +207,9 @@ public:
 	/** @brief Releases and recreates transient state (e.g. on resolution change). */
 	virtual void Reset() {}
 
+	/** @brief Releases runtime overrides on the main thread before loaded changes from true to false; default no-op. */
+	virtual void OnRuntimeDisabled() {}
+
 	/**
 	 * @brief Render-thread scene-transition reset (driven by LoadingMenu open/close).
 	 *
@@ -299,6 +307,70 @@ public:
 	/** @brief Per-frame work executed before Prepass, earliest per-frame hook. */
 	virtual void EarlyPrepass() {}
 
+	/** @brief Called after world-rendering state is set, before the engine renders the scene. */
+	virtual void OnWorldRenderBegin() {}
+
+	/** @brief Called after the world scene is complete, including first-person rendering on SE/AE. */
+	virtual void OnWorldRenderEnd(RE::RENDER_TARGET /*a_renderTarget*/) {}
+
+	/** @brief Called before a post-processing implementation consumes the scene target. */
+	virtual void OnBeforePostProcessing(RE::RENDER_TARGET /*a_renderTarget*/) {}
+
+	/** @brief Replacement scene in engine color encoding, with borrowed resources valid during the post-processing pass. */
+	struct PostProcessingInput
+	{
+		uint32_t width = 0;
+		uint32_t height = 0;
+		ID3D11Texture2D* texture = nullptr;
+		ID3D11ShaderResourceView* srv = nullptr;
+	};
+
+	/** @brief Publishes the size until resource recreation; zero dimensions opt out and resources are null outside the active pass. */
+	virtual PostProcessingInput GetPostProcessingInput() const { return {}; }
+
+	/** @brief Borrowed scene SRV produced for the current tonemap pass, or null when inactive. */
+	virtual ID3D11ShaderResourceView* GetPostProcessingOutput() const { return nullptr; }
+
+	/**
+	 * @brief Global exposure a feature applies to pre-tonemap scene-linear color this frame.
+	 * @note Members are only meaningful once a feature fills them; consumers use exposure 1 otherwise.
+	 */
+	struct SceneExposure
+	{
+		ID3D11ShaderResourceView* adaptedLuminance = nullptr;  ///< StructuredBuffer<float>, element 0
+		float2 luminanceRange{ 1.0f, 1.0f };                   ///< clamp applied to adaptedLuminance
+		float compensationScale = 1.0f;                        ///< linear, exp2(compensation EV)
+
+		static constexpr float kMiddleGrey = 0.18f;
+
+		/** @brief CPU twin of SceneExposure::Evaluate in SceneExposure.hlsli; keep numerically identical. */
+		static float Evaluate(float a_adapted, float2 a_range, float a_scale)
+		{
+			return kMiddleGrey * a_scale / std::min(std::max(a_adapted, a_range.x), a_range.y);
+		}
+	};
+
+	/**
+	 * @brief Fills @p a_out when this feature applies a scene exposure this frame.
+	 *        Excludes color grading, which applies after composite.
+	 * @param a_out Receives the scene exposure; untouched when false is returned.
+	 * @return true when this feature applies a scene exposure this frame.
+	 */
+	virtual bool GetSceneExposure(SceneExposure& /*a_out*/) const { return false; }
+
+	/**
+	 * @brief First loaded feature's scene exposure; false means consumers use exposure 1.
+	 * @param a_out Receives the scene exposure; untouched when false is returned.
+	 * @return true when a loaded feature applies a scene exposure.
+	 */
+	static bool FindSceneExposure(SceneExposure& a_out);
+
+	/** @brief Called after reflection prepasses; returned cleanup runs after cubemap rendering. */
+	virtual std::function<void()> OnReflectionsRenderBegin() { return nullptr; }
+
+	/** @brief Called after engine weather colors and weather extensions have finished updating. */
+	virtual void OnWeatherColorsUpdated(RE::Sky* /*a_sky*/) {}
+
 	/**
 	 * @brief Opt-in flag checked once, when the render-pass hook's feature list is built: return
 	 * true to have OnRenderPassBegin() visited for qualifying render passes. Default false keeps
@@ -317,6 +389,21 @@ public:
 	 *         needs to run afterward.
 	 */
 	virtual std::function<void()> OnRenderPassBegin(const RE::BSRenderPass* /*a_pass*/) { return nullptr; }
+
+	/**
+	 * @brief Opt-in flag checked once, when the skip hook's feature list is built: return true to
+	 * have ShouldSkipRenderPass() consulted before every render pass draws. Default false keeps the
+	 * per-pass hot path free of the call for features that never drop passes.
+	 */
+	virtual bool WantsRenderPassSkipHook() const { return false; }
+
+	/**
+	 * @brief Called before the engine draws each BSRenderPass, for every loaded feature that opted
+	 * in via WantsRenderPassSkipHook(). Runs on the render thread for every pass, so keep it cheap.
+	 * @param a_pass The render pass about to be drawn.
+	 * @return True to drop this pass instead of drawing it.
+	 */
+	virtual bool ShouldSkipRenderPass(const RE::BSRenderPass* /*a_pass*/) { return false; }
 
 	/**
 	 * @brief Called during disk-cache shader loading to generate additional shader permutations.
@@ -482,6 +569,9 @@ public:
 	 */
 	static const std::vector<Feature*>& GetRenderPassHookFeatures();
 
+	/** @brief The features that opted into ShouldSkipRenderPass() via WantsRenderPassSkipHook(), cached once; ForEachLoadedFeature skips unloaded ones. */
+	static const std::vector<Feature*>& GetRenderPassSkipFeatures();
+
 	/**
 	 * @brief Drains pending LoadingMenu transitions and dispatches OnSceneTransitionReset.
 	 *
@@ -500,6 +590,19 @@ public:
 	static Feature* FindFeatureByShortName(const std::string& shortName);
 
 	/**
+	 * @brief Finds the first loaded feature satisfying @p a_pred, or nullptr if none does.
+	 */
+	template <class Pred>
+	static Feature* FindLoadedFeature(Pred&& a_pred)
+	{
+		for (auto* feature : GetFeatureList()) {
+			if (feature->loaded && a_pred(feature))
+				return feature;
+		}
+		return nullptr;
+	}
+
+	/**
 	 * @brief Finds any registered feature by short name, ignoring VR filtering and loaded state.
 	 *
 	 * @param shortName The short name to search for.
@@ -508,7 +611,7 @@ public:
 	static Feature* FindRegisteredFeatureByShortName(const std::string& shortName);
 
 	/**
-	 * @brief Gets sorted short names of all loaded features that appear in the menu.
+	 * @brief Gets sorted short names of all loaded features.
 	 *
 	 * @return Sorted vector of short name strings.
 	 */
@@ -558,13 +661,18 @@ public:
 	 * @param methodName Label for the Tracy zone (e.g. "OnRenderPassBegin").
 	 * @param callback Callable receiving a Feature* for each loaded feature.
 	 * @param emitGpuZone When true and Tracy is enabled, also emits a GPU timer zone.
+	 * @param emitCpuZone When false, skips the per-feature Tracy zones (CPU and GPU); use on per-pass hot paths.
 	 */
 	template <typename Func>
-	static inline void ForEachLoadedFeature(const std::vector<Feature*>& features, std::string_view methodName, Func&& callback, bool emitGpuZone = false)
+	static inline void ForEachLoadedFeature(const std::vector<Feature*>& features, std::string_view methodName, Func&& callback, bool emitGpuZone = false, bool emitCpuZone = true)
 	{
 		for (auto* feature : features) {
 			if (feature->loaded) {
 #ifdef TRACY_ENABLE
+				if (!emitCpuZone) {
+					callback(feature);
+					continue;
+				}
 				{
 					const auto zoneName = std::format("{}::{}", feature->GetShortName(), methodName);
 					ZoneTransientN(___tracy_feature_zone, zoneName.c_str(), true);
@@ -581,6 +689,32 @@ public:
 			}
 		}
 	}
+
+	/** @brief Applies feature render callbacks and runs their cleanup in reverse order on scope exit. */
+	class RenderScope
+	{
+	public:
+		template <typename Func>
+		RenderScope(const std::vector<Feature*>& a_features, std::string_view a_methodName, Func&& a_callback)
+		{
+			ForEachLoadedFeature(a_features, a_methodName, [&](Feature* feature) {
+				if (auto cleanup = a_callback(feature))
+					cleanups.push_back(std::move(cleanup));
+			});
+		}
+
+		RenderScope(const RenderScope&) = delete;
+		RenderScope& operator=(const RenderScope&) = delete;
+
+		~RenderScope()
+		{
+			for (auto it = cleanups.rbegin(); it != cleanups.rend(); ++it)
+				(*it)();
+		}
+
+	private:
+		std::vector<std::function<void()>> cleanups;
+	};
 
 protected:
 	/** Reapplies override-controlled values for the selected top-level setting keys. */

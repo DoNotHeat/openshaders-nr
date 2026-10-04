@@ -28,6 +28,7 @@
 #include "Features/LinearLighting.h"
 #include "Features/PerformanceOverlay.h"
 #include "Features/PostProcessing.h"
+#include "Features/ProceduralSun.h"
 #include "Features/RemoteControl.h"
 #include "Features/RenderDoc.h"
 #include "Features/SceneManager.h"
@@ -52,6 +53,7 @@
 #include "Features/VolumetricShadows.h"
 #include "Features/WaterEffects.h"
 #include "Features/WetnessEffects.h"
+#include "Features/Wind/Wind.h"
 #include "Menu.h"
 #include "SceneSettingsManager.h"
 #include "ShaderCache.h"
@@ -72,6 +74,7 @@ namespace globals
 	{
 		CloudShadows cloudShadows{};
 		CloudRelight cloudRelight{};
+		ProceduralSun proceduralSun{};
 		DynamicCubemaps dynamicCubemaps{};
 		VolumetricShadows volumetricShadows{};
 		ExtendedMaterials extendedMaterials{};
@@ -115,6 +118,7 @@ namespace globals
 		ScreenshotFeature screenshotFeature{};
 		CSEditor csEditor{};
 		CSUtility csUtility{};
+		Wind wind{};
 		FeatureOverwrites featureOverwrites{};
 		ExponentialHeightFog exponentialHeightFog{};
 		TruePBR truePBR{};
@@ -147,6 +151,7 @@ namespace globals
 		RE::BSUtilityShader* utilityShader = nullptr;
 		RE::PlayerCharacter* player = nullptr;
 		RE::PlayerCamera* playerCamera = nullptr;
+		RE::MenuTopicManager* menuTopicManager = nullptr;
 		RE::Sky* sky = nullptr;
 		RE::UI* ui = nullptr;
 		RE::Calendar* calendar = nullptr;
@@ -272,6 +277,7 @@ namespace globals
 		RefreshTES();
 		player = RE::PlayerCharacter::GetSingleton();
 		playerCamera = RE::PlayerCamera::GetSingleton();
+		menuTopicManager = RE::MenuTopicManager::GetSingleton();
 		sky = RE::Sky::GetSingleton();
 		calendar = RE::Calendar::GetSingleton();
 		utilityShader = RE::BSUtilityShader::GetSingleton();

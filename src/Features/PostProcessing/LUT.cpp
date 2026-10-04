@@ -1,7 +1,9 @@
 #include "LUT.h"
 
+#include "Features/PostProcessing.h"
 #include "GpuPass.h"
 #include "PostProcessingUI.h"
+#include "RasterPass.h"
 #include "ShaderCache.h"
 #include "State.h"
 #include "Util.h"
@@ -27,10 +29,10 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 
 void LUT::DrawSettings()
 {
-	ImGui::TextWrapped(T("feature.post_processing.lut.relative_path_starts_from_game_executable_directory_supports", "Relative path starts from game executable directory. Supports dds/bmp/png format."));
-	ImGui::BulletText(T("feature.post_processing.lut.1d_lut_n_x_1_sized_images", "1D LUT: N x 1 sized images."));
-	ImGui::BulletText(T("feature.post_processing.lut.3d_lut_in_2d_format_n_r_x", "3D LUT in 2D format: N (R) x N (G) sized images, stacked horizontally along blue axis."));
-	ImGui::BulletText(T("feature.post_processing.lut.3d_lut_3d_dds_only", "3D LUT: 3D dds only."));
+	ImGui::TextWrapped("%s", T("feature.post_processing.lut.relative_path_starts_from_game_executable_directory_supports", "Relative path starts from game executable directory. Supports dds/bmp/png format."));
+	ImGui::BulletText("%s", T("feature.post_processing.lut.1d_lut_n_x_1_sized_images", "1D LUT: N x 1 sized images."));
+	ImGui::BulletText("%s", T("feature.post_processing.lut.3d_lut_in_2d_format_n_r_x", "3D LUT in 2D format: N (R) x N (G) sized images, stacked horizontally along blue axis."));
+	ImGui::BulletText("%s", T("feature.post_processing.lut.3d_lut_3d_dds_only", "3D LUT: 3D dds only."));
 
 	ImGui::InputText(T("feature.post_processing.lut.lut_texture_path", "LUT Texture Path"), &tempPath);
 
@@ -47,7 +49,7 @@ void LUT::DrawSettings()
 	}
 
 	if (LutType == -1)
-		ImGui::Text(T("feature.post_processing.lut.loaded_texture_none", "Loaded Texture: None"));
+		ImGui::TextUnformatted(T("feature.post_processing.lut.loaded_texture_none", "Loaded Texture: None"));
 	else
 		ImGui::Text(T("feature.post_processing.lut.loaded_texture", "Loaded Texture: %s"), settings.LutPath.c_str());
 
@@ -98,8 +100,6 @@ void LUT::SaveSettings(json& o_json)
 
 void LUT::SetupResources()
 {
-	auto renderer = globals::game::renderer;
-
 	if (!settings.LutPath.empty())
 		ReadTexture(settings.LutPath);
 
@@ -110,10 +110,7 @@ void LUT::SetupResources()
 
 	logger::debug("Creating 2D textures...");
 	{
-		auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
-
-		D3D11_TEXTURE2D_DESC texDesc;
-		gameTexMainCopy.texture->GetDesc(Util::AsW32(&texDesc));
+		auto texDesc = owner->GetPipelineTextureDesc();
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
 			.Format = texDesc.Format,
@@ -121,22 +118,22 @@ void LUT::SetupResources()
 			.Texture2D = { .MostDetailedMip = 0, .MipLevels = 1 }
 		};
 
-		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {
+		D3D11_RENDER_TARGET_VIEW_DESC rtvDesc = {
 			.Format = texDesc.Format,
-			.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D,
+			.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D,
 			.Texture2D = { .MipSlice = 0 }
 		};
 
 		texDesc.MipLevels = srvDesc.Texture2D.MipLevels = 1;
-		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+		texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 		texDesc.MiscFlags = 0;
 
 		texOutput = eastl::make_unique<Texture2D>(texDesc, "Post Processing LUT Output");
 		texOutput->CreateSRV(srvDesc);
-		texOutput->CreateUAV(uavDesc);
+		texOutput->CreateRTV(rtvDesc);
 	}
 
-	CompileComputeShaders();
+	CompileRasterShaders();
 }
 
 void LUT::ReadTexture(std::filesystem::path path)
@@ -228,20 +225,20 @@ void LUT::ClearShaderCache()
 	BumpShaderGeneration();
 	{
 		std::lock_guard lock(shaderMutex);
-		Util::ClearShaders<ID3D11ComputeShader>({ lutCS });
+		Util::ClearShaders<ID3D11PixelShader>({ lutPS });
 	}
 
 	globals::shaderCache->ClearStandaloneComputeCache(L"PostProcessing/LUT");
-	CompileComputeShaders();
+	CompileRasterShaders();
 }
 
-void LUT::CompileComputeShaders()
+void LUT::CompileRasterShaders()
 {
-	const std::vector<ComputeShaderCompileInfo> shaderInfos = {
-		{ &lutCS, "lut.cs.hlsl" },
+	const std::vector<PixelShaderCompileInfo> shaderInfos = {
+		{ &lutPS, "lut.ps.hlsl" },
 	};
 
-	CompileComputeShadersAsync(L"Data\\Shaders\\PostProcessing\\LUT", shaderInfos);
+	CompileRasterShadersAsync(L"Data\\Shaders\\PostProcessing\\LUT", {}, shaderInfos);
 }
 
 void LUT::Draw(TextureInfo& inout_tex)
@@ -249,7 +246,9 @@ void LUT::Draw(TextureInfo& inout_tex)
 	if (LutType == -1)
 		return;
 
-	if (!AllShadersReady({ &lutCS }))
+	if (!owner || !owner->GetFullscreenVS())
+		return;
+	if (!AllShadersReady({ &lutPS }))
 		return;
 
 	CS_GPU_PASS("PostProcessing::LUT");
@@ -260,35 +259,35 @@ void LUT::Draw(TextureInfo& inout_tex)
 
 	LUTCB data = {
 		.InputMin = settings.InputMin,
+		.InputGamut = static_cast<uint>(inout_tex.gamut),
 		.InputMax = settings.InputMax,
 		.LutType = LutType
 	};
 	lutCB->Update(data);
 
-	ID3D11ShaderResourceView* srv[3] = {
-		inout_tex.srv,
-		LutType == 3 ? nullptr : texLUT2D->srv.get(),
-		LutType == 3 ? texLUT3D->srv.get() : nullptr
-	};
+	{
+		PostProcessingRaster::RasterPass pass(context);
 
-	ID3D11UnorderedAccessView* uav = texOutput->uav.get();
-	ID3D11Buffer* cb = lutCB->CB();
+		ID3D11ShaderResourceView* srv[3] = {
+			inout_tex.srv,
+			LutType == 3 ? nullptr : texLUT2D->srv.get(),
+			LutType == 3 ? texLUT3D->srv.get() : nullptr
+		};
 
-	context->CSSetConstantBuffers(1, 1, &cb);
-	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-	context->CSSetShaderResources(0, 3, srv);
-	context->CSSetShader(lutCS.get(), nullptr, 0);
+		ID3D11Buffer* cb = lutCB->CB();
 
-	context->Dispatch(((uint)res.x + 7) >> 3, ((uint)res.y + 7) >> 3, 1);
+		context->PSSetConstantBuffers(1, 1, &cb);
+		context->PSSetShaderResources(0, 3, srv);
+		pass.SetTargets({ texOutput->rtv.get() }, res.x, res.y);
+		pass.SetShaders(owner->GetFullscreenVS(), lutPS.get());
+		pass.Draw();
 
-	// clean up
-	std::fill(srv, srv + 3, nullptr);
-	uav = nullptr;
-	cb = nullptr;
-	context->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
-	context->CSSetShaderResources(0, 3, srv);
-	context->CSSetConstantBuffers(0, 1, &cb);
-	context->CSSetShader(nullptr, nullptr, 0);
+		// clean up
+		std::fill(srv, srv + 3, nullptr);
+		cb = nullptr;
+		context->PSSetShaderResources(0, 3, srv);
+		context->PSSetConstantBuffers(1, 1, &cb);
+	}
 
 	inout_tex = { texOutput->resource.get(), texOutput->srv.get() };
 }

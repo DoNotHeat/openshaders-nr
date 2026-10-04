@@ -10,6 +10,7 @@
 #include "Globals.h"
 #include "GpuPass.h"
 #include "I18n/I18n.h"
+#include "SkySync.h"
 #include "State.h"
 #include "Util.h"
 
@@ -216,44 +217,6 @@ void TerrainShadows::SaveSettings(json& o_json)
 void TerrainShadows::DrawSettings()
 {
 	ImGui::Checkbox(T(TKEY("enable_terrain_shadow"), "Enable Terrain Shadow"), &settings.EnableTerrainShadow);
-
-	if (ImGui::CollapsingHeader(T(TKEY("debug"), "Debug"))) {
-		std::string curr_worldspace = "N/A";
-		std::string curr_worldspace_name = "N/A";
-		auto tes = RE::TES::GetSingleton();
-		if (tes) {
-			auto worldspace = tes->GetRuntimeData2().worldSpace;
-			if (worldspace) {
-				curr_worldspace = worldspace->GetFormEditorID();
-				curr_worldspace_name = worldspace->GetName();
-			}
-		}
-		bool hasHeightMap = heightmaps.contains(curr_worldspace);
-		ImGui::Text(std::vformat(T(TKEY("current_worldspace"), "Current worldspace: {} ({})"), std::make_format_args(curr_worldspace, curr_worldspace_name)).c_str());
-		ImGui::Text(std::vformat(T(TKEY("has_height_map"), "Has height map: {}"), std::make_format_args(hasHeightMap)).c_str());
-
-		ImGui::Separator();
-
-		ImGui::BulletText(T(TKEY("shadow_update_cb_data"), "shadowUpdateCBData"));
-		ImGui::Indent();
-		{
-			ImGui::Text(std::vformat(T(TKEY("light_px_dir"), "LightPxDir: ({}, {})"), std::make_format_args(shadowUpdateCBData.LightPxDir.x, shadowUpdateCBData.LightPxDir.y)).c_str());
-			ImGui::Text(std::vformat(T(TKEY("light_delta_z"), "LightDeltaZ: ({}, {})"), std::make_format_args(shadowUpdateCBData.LightDeltaZ.x, shadowUpdateCBData.LightDeltaZ.y)).c_str());
-			ImGui::Text(std::vformat(T(TKEY("start_px_coord"), "StartPxCoord: {}"), std::make_format_args(shadowUpdateCBData.StartPxCoord)).c_str());
-			ImGui::Text(std::vformat(T(TKEY("px_size"), "PxSize: ({}, {})"), std::make_format_args(shadowUpdateCBData.PxSize.x, shadowUpdateCBData.PxSize.y)).c_str());
-		}
-		ImGui::Unindent();
-
-		if (ImGui::TreeNode(T(TKEY("buffer_viewer"), "Buffer Viewer"))) {
-			static float debugRescale = .1f;
-			ImGui::SliderFloat(T(TKEY("view_resize"), "View Resize"), &debugRescale, 0.f, 1.f);
-
-			if (texShadowHeight) {
-				BUFFER_VIEWER_NODE_BULLET(texShadowHeight, debugRescale)
-			}
-			ImGui::TreePop();
-		}
-	}
 }
 
 void TerrainShadows::ClearShaderCache()
@@ -377,10 +340,16 @@ TerrainShadows::PerFrame TerrainShadows::GetCommonBufferData()
 	};
 
 	if (isHeightmapReady) {
+		// One heightmap step of light descent, so the z blur spans about two texels in xy.
+		constexpr float zBlurSteps = 1.0f;
 		auto invScale = cachedHeightmap->pos1 - cachedHeightmap->pos0;
 		data.Scale = float3(1.f, 1.f, 1.f) / invScale;
-		data.Offset = -cachedHeightmap->pos0 * float2{ data.Scale.x, data.Scale.y };
+		// Texel centres lie on terrain vertices anchored at the south-west corner.
+		const float2 halfTexel = { 0.5f / texHeightMap->desc.Width, -0.5f / texHeightMap->desc.Height };
+		data.Offset = float2(-cachedHeightmap->pos0 * float2{ data.Scale.x, data.Scale.y }) + halfTexel;
 		data.ZRange = cachedHeightmap->zRange;
+		const float stepDescent = -0.5f * (shadowUpdateCBData.LightDeltaZ.x + shadowUpdateCBData.LightDeltaZ.y) * (data.ZRange.y - data.ZRange.x);
+		data.ZBlur = stepDescent * zBlurSteps;
 	}
 
 	return data;
@@ -547,40 +516,44 @@ bool TerrainShadows::UpdateShadow(bool a_refreshImmediately)
 		shadowUpdateIdx = 0;
 	if (shadowUpdateIdx == 0) {
 		float3 dirLightDir = currentSunDirection;
-		if (dirLightDir.z > 0)
+		if (const auto celestialDirection = globals::features::skySync.GetCelestialLightDirection())
+			dirLightDir = float3{ -celestialDirection->x, -celestialDirection->y, -celestialDirection->z };
+		else if (dirLightDir.z > 0)
 			dirLightDir = -dirLightDir;
 
 		// in UV
 		float3 invScale = cachedHeightmap->pos1 - cachedHeightmap->pos0;
 		invScale.z = cachedHeightmap->zRange.y - cachedHeightmap->zRange.x;
-		float3 dirLightPxDir = dirLightDir / invScale;
-		dirLightPxDir.x *= width;
-		dirLightPxDir.y *= height;
+		float2 dirLightPxDir = { dirLightDir.x / invScale.x * width, dirLightDir.y / invScale.y * height };
+		if (dirLightPxDir.x == 0.f && dirLightPxDir.y == 0.f)
+			dirLightPxDir = float2(1.f, 0.f);
 
-		float stepMult;
 		if (abs(dirLightPxDir.x) >= abs(dirLightPxDir.y)) {
-			stepMult = 1.f / abs(dirLightPxDir.x);
 			edgePxCoord = dirLightPxDir.x > 0 ? 0 : (width - 1);
 			signDir = dirLightPxDir.x > 0 ? 1 : -1;
+			dirLightPxDir.y /= abs(dirLightPxDir.x);
+			dirLightPxDir.x = static_cast<float>(signDir);
 			maxUpdates = (width + updateLength - 1) >> logUpdateLength;
 		} else {
-			stepMult = 1.f / abs(dirLightPxDir.y);
 			edgePxCoord = dirLightPxDir.y > 0 ? 0 : height - 1;
 			signDir = dirLightPxDir.y > 0 ? 1 : -1;
+			dirLightPxDir.x /= abs(dirLightPxDir.y);
+			dirLightPxDir.y = static_cast<float>(signDir);
 			maxUpdates = (height + updateLength - 1) >> logUpdateLength;
 		}
-		dirLightPxDir *= stepMult;
 
-		shadowUpdateCBData.LightPxDir = float2{ dirLightPxDir.x, dirLightPxDir.y };
+		shadowUpdateCBData.LightPxDir = dirLightPxDir;
 
 		// soft shadow angles
 		float lenUV = float2{ dirLightDir.x, dirLightDir.y }.Length();
 		float dirLightAngle = atan2(-dirLightDir.z, lenUV);
 		float shadowSofteningRadiusAngle = RE::NI_PI / 180.f;
-		float upperAngle = std::max(0.f, dirLightAngle - shadowSofteningRadiusAngle);
-		float lowerAngle = std::min(RE::NI_HALF_PI - 1e-2f, dirLightAngle + shadowSofteningRadiusAngle);
+		float maxAngle = RE::NI_HALF_PI - 1e-2f;
+		float upperAngle = std::clamp(dirLightAngle - shadowSofteningRadiusAngle, 0.f, maxAngle);
+		float lowerAngle = std::clamp(dirLightAngle + shadowSofteningRadiusAngle, 0.f, maxAngle);
+		float stepLength = float2{ dirLightPxDir.x * invScale.x / width, dirLightPxDir.y * invScale.y / height }.Length();
 
-		shadowUpdateCBData.LightDeltaZ = -(lenUV / invScale.z * stepMult) * float2{ std::tan(upperAngle), std::tan(lowerAngle) };
+		shadowUpdateCBData.LightDeltaZ = -(stepLength / invScale.z) * float2{ std::tan(upperAngle), std::tan(lowerAngle) };
 	}
 
 	shadowUpdateCBData.PxSize = float2{ 1.f / texHeightMap->desc.Width, 1.f / texHeightMap->desc.Height };

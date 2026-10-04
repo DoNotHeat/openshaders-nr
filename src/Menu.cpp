@@ -159,7 +159,6 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	GlobalScale,
 	FontRoles,
 	UseSimplePalette,
-	ShowActionIcons,
 	UseMonochromeIcons,
 	UseMonochromeLogo,
 	ShowFooter,
@@ -817,12 +816,7 @@ void Menu::DrawSettings()
 		}
 
 		const float uiScale = exp2(globalScale);  // User's manual GlobalScale for header icons
-		// Check if we can show icons - require setting enabled and at least some icons loaded (for undocked)
-		// For docked mode, always show icons if textures are available
-		bool canShowIcons = settings.Theme.ShowActionIcons &&
-		                    (uiIcons.saveSettings.texture ||
-								uiIcons.loadSettings.texture ||
-								uiIcons.clearCache.texture);  // Always show logo if available, regardless of action icons setting
+		bool canShowIcons = uiIcons.saveSettings.texture || uiIcons.loadSettings.texture || uiIcons.clearCache.texture;
 		bool showLogo = uiIcons.logo.texture != nullptr;
 
 		// Render header using extracted component
@@ -858,6 +852,17 @@ void Menu::DrawSettings()
 		Util::DrawClearShaderCacheConfirmation();
 	}
 	ImGui::End();
+}
+
+void Menu::DrawEditorSettings(bool resetEditorLayout)
+{
+	if (focusChanged) {
+		OnFocusChanged();
+		focusChanged = false;
+	}
+	size_t selectedMenu = 0;
+	FeatureListRenderer::RenderFeatureList(0.0f, sidebar, selectedMenu, featureSearch, pendingFeatureSelection, [this]() { DrawGeneralSettings(); }, [this]() { DrawAdvancedSettings(); }, true, resetEditorLayout);
+	Util::DrawClearShaderCacheConfirmation();
 }
 
 /**
@@ -1208,7 +1213,7 @@ void Menu::ProcessInputEventQueue()
 								 ImGui::GetIO().ClearInputKeys();  // Prevent toggle key from remaining "held" in ImGui after open.
 						 }
 					 } },
-					{ settings.SkipCompilationKey, [this, shaderCache]() { if (!ShouldSwallowInput() && shaderCache->IsCompiling()) shaderCache->backgroundCompilation = true; } },
+					{ settings.SkipCompilationKey, [this, shaderCache]() { if (!ShouldSwallowInput() && shaderCache->IsCompiling()) shaderCache->SetBackgroundCompilation(true); } },
 					{ settings.EffectToggleKey, [shaderCache]() { shaderCache->SetEnabled(!shaderCache->IsEnabled()); } },
 					{ settings.ShaderBlockPrevKey, [this, shaderCache]() { if (settings.EnableShaderBlocking) shaderCache->IterateShaderBlock(); } },
 					{ settings.ShaderBlockNextKey, [this, shaderCache]() { if (settings.EnableShaderBlocking) shaderCache->IterateShaderBlock(false); } },

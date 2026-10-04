@@ -14,10 +14,9 @@
 //   - Game menus are no longer occluded by the upscaler output.
 //
 //  Current limitations:
-//   - Post-processing still runs on renderRes kMAIN via a 3x3-box downscale
-//     of testTexture (see BoxDownscalePS.hlsl). Performance is good and
-//     visual loss is minimal. Once the post chain is rewritten to consume
-//     testTexture natively the downscale can be removed.
+//   - Engine exposure and bloom use renderRes kMAIN via a 3x3-box downscale
+//     of testTexture (see BoxDownscalePS.hlsl). Native post-processing
+//     consumes the display-resolution scene through the feature input contract.
 //   - Main menu / pause backgrounds render through a path that doesn't pass
 //     through Main_PostProcessing. We bridge them via ISCopyRender_Hook +
 //     MaybeBlitMenuBG: ISCopy's destination viewport is stretched to the
@@ -51,6 +50,8 @@ struct PerfMode
 
 	// Phase 2: resolution hook status
 	bool IsHookActive() const { return hookActive; }
+	/** @brief True while PerfMode presents through its DisplayRes testTexture. */
+	bool IsPresentingTestTexture() const { return IsHookActive() && GetTestTexture(); }
 	bool IsPostInterceptActive() const { return postInterceptActive; }
 	bool IsPostChainDone() const { return postChainDone; }
 	void ClearPostChainDone() { postChainDone = false; }
@@ -62,6 +63,7 @@ struct PerfMode
 	// an explicit vrRenderScale). DLSS dispatch uses this, not the live preset.
 	uint32_t GetLatchedQualityMode() const { return latchedQualityMode; }
 	bool IsExplicitScaleLatched() const { return explicitScaleLatched; }
+	bool IsDisplaySizeChanged() const { return displaySizeChanged; }
 
 	// Phase 3: real HMD display resolution in SBS format (e.g. 3072×1632)
 	// Used by Upscaling pipeline to override polluted screenSize (which equals RenderRes after hook)
@@ -170,6 +172,10 @@ private:
 	uint32_t renderEyeHeight = 0;
 	uint32_t latchedQualityMode = 0;
 	bool explicitScaleLatched = false;
+	bool displaySizeChanged = false;
+	bool hookBaselineCaptured = false;
+	uint32_t hookBaselineEyeWidth = 0;
+	uint32_t hookBaselineEyeHeight = 0;
 
 	// Phase 2: vtable hook for BSOpenVR::GetRenderTargetSize (vfunc 0x12)
 	struct GetRenderTargetSize_Hook

@@ -296,23 +296,23 @@ void HDRDisplay::DrawSettings()
 	auto hdrWarningPopupTitle = std::format("{}##HDRDisplay", T(TKEY("warning_popup_title"), "HDR Warning"));
 
 	if (isHDRMonitor) {
-		Util::Text::Success(T(TKEY("display_detected"), "HDR Display Detected"));
+		Util::Text::Success("%s", T(TKEY("display_detected"), "HDR Display Detected"));
 	} else if (isHDRCapableMonitor) {
-		Util::Text::Warning(T(TKEY("capable_display_windows_hdr_off"), "HDR Capable Display (Windows HDR is off)"));
+		Util::Text::Warning("%s", T(TKEY("capable_display_windows_hdr_off"), "HDR Capable Display (Windows HDR is off)"));
 		if (auto _tt = Util::HoverTooltipWrapper()) {
 			ImGui::TextUnformatted(T(TKEY("capable_display_windows_hdr_off_tooltip_0"), "Your monitor supports HDR, but Windows HDR is currently disabled."));
 			ImGui::TextUnformatted(T(TKEY("capable_display_windows_hdr_off_tooltip_1"), "Enable HDR in Windows Display Settings to allow auto-detection."));
 		}
 	} else {
-		Util::Text::Warning(T(TKEY("sdr_display_not_detected"), "SDR Display (HDR not detected)"));
+		Util::Text::Warning("%s", T(TKEY("sdr_display_not_detected"), "SDR Display (HDR not detected)"));
 	}
 
 	const bool isExclusiveFullscreen = globals::features::upscaling.loaded ? !globals::features::upscaling.isWindowed : wasExclusiveFullscreen;
 
 	if (isExclusiveFullscreen) {
 		ImGui::Spacing();
-		Util::Text::WrappedWarning(T(TKEY("exclusive_fullscreen_warning"), "WARNING: Exclusive Fullscreen detected."));
-		Util::Text::WrappedWarning(T(TKEY("exclusive_fullscreen_warning_detail"), "HDR is not compatible with Exclusive Fullscreen and may not work correctly. Switch to Borderless Windowed mode for proper HDR support."));
+		Util::Text::WrappedWarning("%s", T(TKEY("exclusive_fullscreen_warning"), "WARNING: Exclusive Fullscreen detected."));
+		Util::Text::WrappedWarning("%s", T(TKEY("exclusive_fullscreen_warning_detail"), "HDR is not compatible with Exclusive Fullscreen and may not work correctly. Switch to Borderless Windowed mode for proper HDR support."));
 		ImGui::Spacing();
 	}
 
@@ -399,7 +399,7 @@ void HDRDisplay::DrawSettings()
 		std::lock_guard<std::mutex> lock(settingsMutex);
 		if (!isHDRMonitor && settings.enableHDR) {
 			ImGui::Spacing();
-			Util::Text::WrappedWarning(T(TKEY("enabled_without_detected_display"), "HDR is enabled but no HDR display was detected."));
+			Util::Text::WrappedWarning("%s", T(TKEY("enabled_without_detected_display"), "HDR is enabled but no HDR display was detected."));
 		}
 	}
 
@@ -407,11 +407,11 @@ void HDRDisplay::DrawSettings()
 		// Prevent background dimming by pushing lower modal dimming
 		ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
 
-		Util::Text::Warning(T(TKEY("force_enable_hdr_warning"), "WARNING: Force Enable HDR"));
+		Util::Text::Warning("%s", T(TKEY("force_enable_hdr_warning"), "WARNING: Force Enable HDR"));
 		ImGui::Separator();
 		ImGui::Spacing();
-		Util::Text::WrappedWarning(T(TKEY("force_enable_hdr_detected_warning"), "HDR was not detected on your monitor."));
-		Util::Text::WrappedWarning(T(TKEY("force_enable_hdr_sdr_warning"), "The game will look VERY WRONG on an SDR (standard) display."));
+		Util::Text::WrappedWarning("%s", T(TKEY("force_enable_hdr_detected_warning"), "HDR was not detected on your monitor."));
+		Util::Text::WrappedWarning("%s", T(TKEY("force_enable_hdr_sdr_warning"), "The game will look VERY WRONG on an SDR (standard) display."));
 		ImGui::Spacing();
 		ImGui::TextWrapped("%s", T(TKEY("force_enable_hdr_confirm"), "Only proceed if you have an HDR-capable display that was not detected correctly."));
 		ImGui::Spacing();
@@ -589,11 +589,14 @@ void HDRDisplay::LoadSettings(json& o_json)
 void HDRDisplay::RestoreDefaultSettings()
 {
 	bool hdrMonitor = DetectHDR();
+	std::lock_guard<std::mutex> lock(settingsMutex);
 	settings.enableHDR = hdrMonitor;
 	settings.hdrPaperWhite = 203;
 	settings.hdrPeakNits = 1000;
 	settings.hdrUIBrightness = 1.0f;
 	settings.dontShowHDRWarning = false;
+	UpdateHDRData();
+	UpdateSwapChainColorSpace();
 }
 
 void HDRDisplay::DataLoaded()
@@ -837,7 +840,7 @@ HDRDisplay::D3D12UIBufferMode HDRDisplay::GetD3D12UIBufferMode()
 	if (!globals::features::upscaling.d3d12SwapChainActive)
 		return mode;
 
-	const bool hdrReady = loaded && hdrDataCB && outputTexture;
+	const bool hdrReady = loaded && settings.enableHDR && hdrDataCB && outputTexture;
 	const bool hdrShaderAvailable = hdrReady && GetHDROutputCS() != nullptr;
 
 	mode.useUIBuffer = hdrShaderAvailable || IsFGCompositingThisFrame();
@@ -1120,7 +1123,7 @@ HRESULT HDRDisplay::HandleSwapChainPresent(
 	const std::function<HRESULT(IDXGISwapChain*, UINT, UINT)>& presentChain)
 {
 	const bool frameGenActive = globals::features::upscaling.d3d12SwapChainActive;
-	const bool hdrReady = loaded && hdrDataCB && outputTexture && (settings.enableHDR || frameGenActive);
+	const bool hdrReady = loaded && hdrDataCB && outputTexture && settings.enableHDR;
 
 	D3D11_VIEWPORT savedViewport{};
 	UINT viewportCount = 1;
@@ -1274,6 +1277,8 @@ void HDRDisplay::SnapshotCleanScene()
 {
 	if (!hdrTexture || !hdrTexture->resource)
 		return;
+	if (IsCleanSceneCaptureFresh())
+		return;
 
 	const D3D11_TEXTURE2D_DESC& sceneDesc = hdrTexture->desc;
 
@@ -1318,11 +1323,13 @@ void HDRDisplay::SnapshotCleanScene()
 
 	globals::d3d::context->CopyResource(cleanSceneCapture->resource.get(), hdrTexture->resource.get());
 	cleanSceneCaptureFrame = globals::state->frameCount;
+	cleanSceneCaptureGeneration = sceneGeneration;
 }
 
 bool HDRDisplay::IsCleanSceneCaptureFresh() const
 {
-	return cleanSceneCapture && cleanSceneCapture->srv && cleanSceneCaptureFrame == globals::state->frameCount;
+	return cleanSceneCapture && cleanSceneCapture->srv && cleanSceneCaptureFrame == globals::state->frameCount &&
+	       cleanSceneCaptureGeneration == sceneGeneration;
 }
 
 ID3D11Texture2D* HDRDisplay::ComposeCleanCapture(ID3D11ShaderResourceView* sceneSRV, bool sdrPreview)
@@ -1635,7 +1642,7 @@ HDRDisplay::HDRDataCB HDRDisplay::BuildHDRData() const
 
 	// Linear Lighting keeps the pipeline linear throughout.
 	// Without it, ISHDR gamma-encodes its output even in HDR mode.
-	bool isSceneLinear = globals::features::linearLighting.settings.enableLinearLighting;
+	bool isSceneLinear = globals::features::linearLighting.IsLinearLightingActive();
 
 	// Use user-specified peak brightness for highlights compression
 	float effectivePeakNits = static_cast<float>(settings.hdrPeakNits);

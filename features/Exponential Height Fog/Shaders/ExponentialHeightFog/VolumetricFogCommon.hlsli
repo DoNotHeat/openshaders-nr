@@ -1,11 +1,25 @@
 #ifndef __EXPONENTIAL_HEIGHT_FOG_VOLUMETRIC_COMMON_HLSLI__
 #define __EXPONENTIAL_HEIGHT_FOG_VOLUMETRIC_COMMON_HLSLI__
 
+#include "Common/Color.hlsli"
 #include "Common/Math.hlsli"
 #include "Common/SharedData.hlsli"
 
 namespace ExponentialHeightFog
 {
+	// Extinction is per world unit and can be much smaller than the generic division epsilon.
+	static const float kMinimumExtinction = 1e-20f;
+
+	float3 GetDirectionalLightColor()
+	{
+		if (!ENABLE_LL)
+			return SharedData::DirLightColor.xyz;
+
+		float lightScale = SharedData::linearLightingSettings.dirLightMult;
+		float3 lightColor = lightScale > 0.0f ? SharedData::DirLightColor.xyz / lightScale : 0.0f.xxx;
+		return (SharedData::linearLightingSettings.isDirLightLinear ? Color::GamutTransform(lightColor) : Color::AuthoredColor(lightColor)) * lightScale;
+	}
+
 	float HenyeyGreenstein(float cosTheta, float g)
 	{
 		float g2 = g * g;
@@ -20,12 +34,16 @@ namespace ExponentialHeightFog
 
 	float GetHeightFogDensity()
 	{
-		return SharedData::exponentialHeightFogSettings.fogDensity * 0.001f;
+		float density = SharedData::exponentialHeightFogSettings.fogDensity;
+		if (SharedData::exponentialHeightFogSettings.useVanillaFogSettings != 0)
+			density = SharedData::exponentialHeightFogSettings.vanillaFogDensity * SharedData::exponentialHeightFogSettings.vanillaFogStrength;
+		return density * 0.001f;
 	}
 
 	float GetVolumetricStartDistance()
 	{
-		return max(0.0f, SharedData::exponentialHeightFogSettings.volumetricFogStartDistance);
+		return SharedData::exponentialHeightFogSettings.useVanillaFogSettings != 0 ? 0.0f :
+		                                                                             max(0.0f, SharedData::exponentialHeightFogSettings.volumetricFogStartDistance);
 	}
 
 	float GetVolumetricEndDistance()
@@ -87,6 +105,17 @@ namespace ExponentialHeightFog
 		return ComputeVolumetricNormalizedSlice(viewDepth, GetVolumetricGridSizeZ());
 	}
 
+	float3 GetFogAmbientColor(float distance)
+	{
+		float normalizedRange = saturate((distance - SharedData::exponentialHeightFogSettings.vanillaFogNear) /
+										 max(SharedData::exponentialHeightFogSettings.vanillaFogFar - SharedData::exponentialHeightFogSettings.vanillaFogNear, 1.0f));
+		float maxOpacity = saturate(SharedData::exponentialHeightFogSettings.vanillaFogMaxOpacity);
+		float colorBlend = min(pow(normalizedRange, SharedData::exponentialHeightFogSettings.vanillaFogPower), maxOpacity);
+		float3 color = Color::Fog(lerp(SharedData::exponentialHeightFogSettings.vanillaFogNearColor.rgb,
+			SharedData::exponentialHeightFogSettings.vanillaFogFarColor.rgb, colorBlend));
+		return color;
+	}
+
 	float EvaluateHeightFogExtinction(float3 positionWS, float3 cameraWS)
 	{
 		float fogDensity = GetHeightFogDensity();
@@ -95,6 +124,16 @@ namespace ExponentialHeightFog
 		float exponent = fogHeightFalloff * max(worldHeight - SharedData::exponentialHeightFogSettings.fogHeight, 0.0f);
 		float localDensity = fogDensity * exp2(-exponent);
 		return max(localDensity * SharedData::exponentialHeightFogSettings.volumetricFogExtinctionScale * 0.5f, 0.0f);
+	}
+
+	float EvaluateFogExtinctionSegment(float nearDistance, float farDistance, float3 positionWS, float3 cameraWS)
+	{
+		float extinction = EvaluateHeightFogExtinction(positionWS, cameraWS);
+		if (SharedData::exponentialHeightFogSettings.useVanillaFogSettings != 0) {
+			float fogDistance = max(farDistance - max(nearDistance, SharedData::exponentialHeightFogSettings.startDistance), 0.0f);
+			extinction *= saturate(fogDistance / max(farDistance - nearDistance, EPSILON_DIVISION));
+		}
+		return max(extinction, 0.0f);
 	}
 }
 

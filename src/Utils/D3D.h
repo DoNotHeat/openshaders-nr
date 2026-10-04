@@ -1,11 +1,11 @@
 #pragma once
 
 #include "REX/W32/Bridge.h"
+#include "ShaderInclude.h"
 #include <array>
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <filesystem>
-#include <fstream>
 #include <functional>
 #include <type_traits>
 #include <winrt/base.h>
@@ -18,46 +18,6 @@ namespace Util
 	using REX::W32::AsW32;
 	using REX::W32::CastTo;
 
-	/**
-	 * @brief ID3DInclude handler resolving #include paths under Data\Shaders,
-	 *        shared by every HLSL compile call site in this codebase.
-	 */
-	struct CustomInclude : public ID3DInclude
-	{
-		HRESULT Open([[maybe_unused]] D3D_INCLUDE_TYPE IncludeType, LPCSTR pFileName, [[maybe_unused]] LPCVOID pParentData, LPCVOID* ppData, UINT* pBytes) override
-		{
-			std::filesystem::path filePath = pFileName;
-			filePath = L"Data\\Shaders" / filePath;
-
-			std::ifstream file(filePath, std::ios::binary);
-			if (!file.is_open()) {
-				*ppData = NULL;
-				*pBytes = 0;
-				return E_FAIL;
-			}
-
-			file.seekg(0, std::ios::end);
-			UINT size = static_cast<UINT>(file.tellg());
-			file.seekg(0, std::ios::beg);
-
-			char* data = new char[size];
-			if (!file.read(data, size)) {
-				delete[] data;
-				*ppData = NULL;
-				*pBytes = 0;
-				return E_FAIL;
-			}
-			*ppData = data;
-			*pBytes = size;
-			return S_OK;
-		}
-
-		HRESULT Close(LPCVOID pData) override
-		{
-			delete[] static_cast<const char*>(pData);
-			return S_OK;
-		}
-	};
 	/**
 	 * @brief Look up the matching SRV for a given render target view.
 	 * @param a_rtv The render target view to look up.
@@ -235,14 +195,15 @@ namespace Util
 	 *
 	 * Covers OM (RTV/DSV, blend, depth-stencil), RS (state, viewports),
 	 * the VS/PS/GS/HS/DS shaders, IA (input layout, vertex/index buffers,
-	 * topology), PS sampler/SRV slot 0, and PS constant-buffer slot 1. The
-	 * destructor nulls PS SRV slot 0 before restoring to break any SRV-vs-RTV
+	 * topology), PS sampler 0 and the requested PS resource/constant-buffer ranges.
+	 * The destructor nulls the saved PS SRV range before restoring to break any SRV-vs-RTV
 	 * hazard left by the wrapped pass. Construct it, set up + issue the pass,
 	 * then let it go out of scope.
 	 */
 	struct FullscreenPassScope
 	{
-		explicit FullscreenPassScope(ID3D11DeviceContext* a_context);
+		/** @brief Saves PS SRVs starting at zero and the specified CB range; defaults preserve SRV0 and CB1. */
+		explicit FullscreenPassScope(ID3D11DeviceContext* a_context, UINT a_psSRVCount = 1, UINT a_psCBStart = 1, UINT a_psCBCount = 1);
 		~FullscreenPassScope();
 		FullscreenPassScope(const FullscreenPassScope&) = delete;
 		FullscreenPassScope& operator=(const FullscreenPassScope&) = delete;
@@ -265,8 +226,11 @@ namespace Util
 		ID3D11DomainShader* savedDS = nullptr;
 		ID3D11RasterizerState* savedRS = nullptr;
 		ID3D11SamplerState* savedSampler0 = nullptr;
-		ID3D11ShaderResourceView* savedSRV0 = nullptr;
-		ID3D11Buffer* savedPSCB1 = nullptr;
+		UINT psSRVCount = 1;
+		UINT psCBStart = 1;
+		UINT psCBCount = 1;
+		ID3D11ShaderResourceView* savedPSSRVs[D3D11_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT] = {};
+		ID3D11Buffer* savedPSCBs[D3D11_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT] = {};
 		ID3D11InputLayout* savedIL = nullptr;
 		ID3D11Buffer* savedVB[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
 		UINT savedVBStride[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};

@@ -12,6 +12,18 @@ file(MAKE_DIRECTORY "${FFX_RUNTIME_DIRECTORY}")
 
 function(download_ffx_runtime _filename _sha256)
     set(_destination "${FFX_RUNTIME_DIRECTORY}/${_filename}")
+    if(SKIP_RUNTIME_DOWNLOADS)
+        # Registering the expected path makes a package install fail on the
+        # absent DLL instead of shipping without it.
+        set(FFX_RUNTIME_PAYLOAD_FILES
+            ${FFX_RUNTIME_PAYLOAD_FILES}
+            "${_destination}"
+            PARENT_SCOPE
+        )
+        return()
+    endif()
+    # Reuse a verified download: a cached DLL with a matching hash skips the
+    # network round-trip entirely (local dev builds reconfigure often).
     set(_download_status 0 "cached")
     if(EXISTS "${_destination}")
         file(SHA256 "${_destination}" _existing_sha256)
@@ -36,10 +48,14 @@ function(download_ffx_runtime _filename _sha256)
             "Failed to download ${_filename}: ${_status_message}"
         )
     endif()
-    set(FFX_RUNTIME_FILES ${FFX_RUNTIME_FILES} "${_destination}" PARENT_SCOPE)
+    set(FFX_RUNTIME_PAYLOAD_FILES
+        ${FFX_RUNTIME_PAYLOAD_FILES}
+        "${_destination}"
+        PARENT_SCOPE
+    )
 endfunction()
 
-set(FFX_RUNTIME_FILES "")
+set(FFX_RUNTIME_PAYLOAD_FILES "")
 download_ffx_runtime(
     amd_fidelityfx_framegeneration_dx12.dll
     02297BEEDD285E822D3A64F314CF00FAF378DCEC0EDC47FF0C4DD71B3A8C2F18
@@ -53,8 +69,10 @@ download_ffx_runtime(
     D0DCCCC74A43C44BA435B7A369B456E0970D8A4464E4BD683119B374F2C9FB46
 )
 
+split_runtime_payload(FFX_RUNTIME)
+
 register_feature_payload(
     Upscaling
-    FILES ${FFX_RUNTIME_FILES}
+    FILES ${FFX_RUNTIME_PAYLOAD_FILES}
     DESTINATION "${FFX_RUNTIME_RELATIVE_DIRECTORY}"
 )

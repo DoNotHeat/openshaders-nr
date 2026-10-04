@@ -47,6 +47,13 @@ struct FoveatedRender
 		kOuterFeather = 3, // Subrect full DLSS to its edge; band OUTSIDE fades to background
 	};
 
+	// Composite mask shape only; the upscaler's input and output stay rectangular.
+	enum class SubrectMaskMode : uint
+	{
+		kRectangle = 0,  // Preserve the rectangular edge behavior
+		kOval = 1,       // Distance-corrected elliptical transition
+	};
+
 	// Periphery AA algorithm applied after background stretch
 	enum class PeripheryAAMode : uint
 	{
@@ -68,6 +75,7 @@ struct FoveatedRender
 	static const char* StretchModeName(StretchMode mode);
 	static const char* PeripheryAAModeName(PeripheryAAMode mode);
 	static const char* SubrectBlendModeName(SubrectBlendMode mode);
+	static const char* SubrectMaskModeName(SubrectMaskMode mode);
 
 	// FoveatedRender-specific settings. Quality mode / sharpness / DLSS preset /
 	// Streamline log level live on Upscaling::Settings and are read through
@@ -89,7 +97,9 @@ struct FoveatedRender
 		uint peripheryAAMode = static_cast<uint>(PeripheryAAMode::kTemporalSmooth);
 		float peripheryTemporalAlpha = 0.16f;
 		uint subrectBlendMode = static_cast<uint>(SubrectBlendMode::kHardCopy);
+		uint subrectMaskMode = static_cast<uint>(SubrectMaskMode::kRectangle);
 		float subrectFeatherWidth = 64.0f;
+		float subrectFalloffCurve = 1.0f;
 		float subrectDitherStrength = 1.0f;
 		// Outer feather (kOuterFeather): band width OUTSIDE the subrect that
 		// fades from the clamped DLSS edge color to the stretched background.
@@ -197,6 +207,8 @@ struct FoveatedRender
 	static constexpr const char* kPresetCenter75 = "Center 75%";                       ///< Centered crop covering 75% of the eye.
 	static constexpr const char* kPresetCenter50 = "Center 50%";                       ///< Centered crop covering 50% of the eye.
 	static constexpr const char* kPresetNasalConvergence50 = "Nasal Convergence 50%";  ///< 50% crop biased toward nasal convergence.
+	static constexpr const char* kPresetNasalConvergence60 = "Nasal Convergence 60%";  ///< 60% crop biased toward nasal convergence.
+	static constexpr const char* kPresetNasalConvergence70 = "Nasal Convergence 70%";  ///< 70% crop biased toward nasal convergence.
 
 	Settings settings;
 	FoveatedRenderEyeTracking::EyeTrackingData eyeTrackingData;  // Eye tracking state and gaze data
@@ -329,7 +341,8 @@ struct FoveatedRender
 	DlssMode GetDlssMode() const;
 	StretchMode GetStretchMode() const { return (StretchMode)std::min(settings.stretchMode, 2u); }
 	PeripheryAAMode GetPeripheryAAMode() const { return static_cast<PeripheryAAMode>(std::min(settings.peripheryAAMode, 1u)); }
-	SubrectBlendMode GetSubrectBlendMode() const { return static_cast<SubrectBlendMode>(std::min(settings.subrectBlendMode, 3u)); }
+SubrectBlendMode GetSubrectBlendMode() const { return static_cast<SubrectBlendMode>(std::min(settings.subrectBlendMode, 3u)); }
+	SubrectMaskMode GetSubrectMaskMode() const { return static_cast<SubrectMaskMode>(std::min(settings.subrectMaskMode, 1u)); }
 
 	// Active getters: clamp + route shared fields through Upscaling::Settings.
 	uint GetActiveQualityMode() const;

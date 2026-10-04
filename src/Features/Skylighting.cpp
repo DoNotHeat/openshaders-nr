@@ -429,14 +429,15 @@ RE::BSShaderProperty::RenderPassArray* Skylighting::BSLightingShaderProperty_Get
 			return precipitationOcclusionMapRenderPassList;
 	}
 
+	constexpr float minOccluderRadius = 32.0f;
 	const bool validOccluder = property->flags.any(kZBufferWrite) &&
 	                           property->flags.none(kRefraction, kTempRefraction, kLODLandscape, kEyeReflect, kDecal, kDynamicDecal) &&
 	                           (skylighting.inOcclusion || property->flags.none(kMultiTextureLandscape, kNoLODLandBlend));
-	if (!validOccluder || !(geometry->worldBound.radius > 32))
+	if (!validOccluder || !(geometry->worldBound.radius > minOccluderRadius))
 		return precipitationOcclusionMapRenderPassList;
 
 	if (skylighting.inOcclusion) {
-		if (auto userData = geometry->GetUserData()) {
+		if (geometry->GetUserData()) {
 			RE::BSFadeNode* fadeNode = nullptr;
 
 			RE::NiNode* parent = geometry->parent;
@@ -492,7 +493,6 @@ RE::BSShaderProperty::RenderPassArray* Skylighting::BSLightingShaderProperty_Get
 		property,
 		geometry,
 		technique.underlying() + static_cast<uint32_t>(ShaderTechnique::UtilityGeneralStart));
-
 	return precipitationOcclusionMapRenderPassList;
 }
 

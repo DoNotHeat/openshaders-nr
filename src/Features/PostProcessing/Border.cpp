@@ -1,6 +1,7 @@
 #include "Border.h"
 
 #include "Deferred.h"
+#include "Features/PostProcessing.h"
 #include "GpuPass.h"
 #include "I18n/I18n.h"
 #include "ShaderCache.h"
@@ -17,15 +18,15 @@ void Border::DrawSettings()
 {
 	ImGui::ColorEdit3(T("feature.post_processing.border.border_color", "Border Color"), reinterpret_cast<float*>(&settings.BorderColor));
 	if (auto _tt = Util::HoverTooltipWrapper())
-		ImGui::Text(T("feature.post_processing.border.the_color_of_the_border", "The color of the border."));
+		ImGui::TextUnformatted(T("feature.post_processing.border.the_color_of_the_border", "The color of the border."));
 
 	ImGui::SliderFloat(T("feature.post_processing.border.depth_threshold", "Depth Threshold"), &settings.DepthThreshold, 0.f, 1.f, "%.2f");
 	if (auto _tt = Util::HoverTooltipWrapper())
-		ImGui::Text(T("feature.post_processing.border.the_depth_threshold_for_the_border_effect", "The depth threshold for the border effect."));
+		ImGui::TextUnformatted(T("feature.post_processing.border.the_depth_threshold_for_the_border_effect", "The depth threshold for the border effect."));
 
 	ImGui::SliderFloat4(T("feature.post_processing.border.scale_top_down_left_right", "Scale (Top, Down, Left, Right)"), reinterpret_cast<float*>(&settings.Scale), 0.f, 0.5f, "%.2f");
 	if (auto _tt = Util::HoverTooltipWrapper())
-		ImGui::Text(T("feature.post_processing.border.the_scale_of_the_border_on_each_side", "The scale of the border on each side of the screen."));
+		ImGui::TextUnformatted(T("feature.post_processing.border.the_scale_of_the_border_on_each_side", "The scale of the border on each side of the screen."));
 }
 
 void Border::RestoreDefaultSettings()
@@ -45,8 +46,6 @@ void Border::SaveSettings(json& o_json)
 
 void Border::SetupResources()
 {
-	auto renderer = globals::game::renderer;
-
 	logger::debug("Creating buffers...");
 	{
 		borderCB = eastl::make_unique<ConstantBuffer>(ConstantBufferDesc<BorderCB>(), "Post Processing Border CB");
@@ -54,10 +53,7 @@ void Border::SetupResources()
 
 	logger::debug("Creating 2D textures...");
 	{
-		auto gameTexMainCopy = renderer->GetRuntimeData().renderTargets[RE::RENDER_TARGETS::kMAIN_COPY];
-
-		D3D11_TEXTURE2D_DESC texDesc;
-		gameTexMainCopy.texture->GetDesc(Util::AsW32(&texDesc));
+		auto texDesc = owner->GetPipelineTextureDesc();
 
 		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {
 			.Format = texDesc.Format,
@@ -98,8 +94,8 @@ void Border::ClearShaderCache()
 void Border::CompileComputeShaders()
 {
 	const std::vector<ComputeShaderCompileInfo> shaderInfos = {
-		{ &borderCS, "border.cs.hlsl" },
-		{ &borderClearMVCS, "border_clear_mv.cs.hlsl" },
+		{ &borderCS, "border.cs.hlsl", {} },
+		{ &borderClearMVCS, "border_clear_mv.cs.hlsl", {} },
 	};
 
 	CompileComputeShadersAsync(L"Data\\Shaders\\PostProcessing\\Border", shaderInfos);
@@ -135,8 +131,7 @@ void Border::ClearMotionVectorsForFrameGen()
 
 	// Bind SharedData (b5) and FrameBuffer (b12) for CS stage — shader needs
 	// BufferDim and DynamicResolutionParams1 to compute dynamic resolution area.
-	auto* sharedDataBuf = globals::state->sharedDataCB->CB();
-	context->CSSetConstantBuffers(5, 1, &sharedDataBuf);
+	globals::state->BindSharedDataCS(context, false);
 	ID3D11Buffer* perFrameBuf = *globals::game::perFrame.get();
 	context->CSSetConstantBuffers(12, 1, &perFrameBuf);
 

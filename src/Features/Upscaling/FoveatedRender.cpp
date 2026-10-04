@@ -29,7 +29,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	peripheryAAMode,
 	peripheryTemporalAlpha,
 	subrectBlendMode,
+	subrectMaskMode,
 	subrectFeatherWidth,
+	subrectFalloffCurve,
 	subrectDitherStrength,
 	subrectOuterFeatherWidth,
 	subrectRoundness,
@@ -144,9 +146,11 @@ void FoveatedRender::ClampSettings()
 	settings.debugVisualize = std::min(settings.debugVisualize, 1u);
 	settings.peripheryAAMode = std::min(settings.peripheryAAMode, 1u);
 	settings.subrectBlendMode = std::min(settings.subrectBlendMode, 3u);
+	settings.subrectMaskMode = std::min(settings.subrectMaskMode, 1u);
 	settings.peripheryBlurRadius = std::clamp(settings.peripheryBlurRadius, 0.5f, 4.0f);
 	settings.peripheryTemporalAlpha = std::clamp(settings.peripheryTemporalAlpha, 0.05f, 0.5f);
 	settings.subrectFeatherWidth = std::clamp(settings.subrectFeatherWidth, 2.0f, 128.0f);
+	settings.subrectFalloffCurve = std::clamp(settings.subrectFalloffCurve, 0.5f, 2.0f);
 	settings.subrectDitherStrength = std::clamp(settings.subrectDitherStrength, 0.0f, 2.0f);
 	settings.subrectOuterFeatherWidth = std::clamp(settings.subrectOuterFeatherWidth, 2.0f, 128.0f);
 	settings.subrectRoundness = std::clamp(settings.subrectRoundness, 0.0f, 1.0f);
@@ -683,6 +687,13 @@ const char* FoveatedRender::SubrectBlendModeName(SubrectBlendMode mode)
 	}
 }
 
+const char* FoveatedRender::SubrectMaskModeName(SubrectMaskMode mode)
+{
+	return mode == SubrectMaskMode::kOval ?
+		T(TKEY("foveated_mask_shape_oval"), "Oval") :
+		T(TKEY("foveated_mask_shape_rectangle"), "Rectangle");
+}
+
 void FoveatedRender::DrawSettings()
 {
 	ClampSettings();
@@ -927,6 +938,9 @@ void FoveatedRender::DrawSettings()
 			ImGui::TextWrapped(T(TKEY("foveated_blend_feather_desc"), "Smoothstep fade over N pixels at the boundary. Hides the seam."));
 			ImGui::SliderFloat(T(TKEY("foveated_feather_width"), "Feather Width"), &settings.subrectFeatherWidth, 2.0f, 128.0f, "%.0f px");
 			ImGui::SliderFloat(T(TKEY("foveated_roundness"), "Roundness"), &settings.subrectRoundness, 0.0f, 1.0f, "%.2f");
+			ImGui::SliderInt(T(TKEY("foveated_mask_shape_label"), "Edge Shape"), reinterpret_cast<int*>(&settings.subrectMaskMode), 0, 1,
+				SubrectMaskModeName(GetSubrectMaskMode()));
+			ImGui::SliderFloat(T(TKEY("foveated_falloff_curve"), "Falloff Curve"), &settings.subrectFalloffCurve, 0.5f, 2.0f, "%.2f");
 			if (auto _tt = Util::HoverTooltipWrapper()) {
 				ImGui::Text("%s", T(TKEY("foveated_roundness_tooltip"),
 					"Morphs the region boundary from a rectangle (0) toward an ellipse (1).\n"
@@ -939,6 +953,9 @@ void FoveatedRender::DrawSettings()
 			ImGui::SliderFloat(T(TKEY("foveated_band_width"), "Band Width"), &settings.subrectFeatherWidth, 2.0f, 128.0f, "%.0f px");
 			ImGui::SliderFloat(T(TKEY("foveated_noise_amount"), "Noise Amount"), &settings.subrectDitherStrength, 0.0f, 2.0f, "%.2f");
 			ImGui::SliderFloat(T(TKEY("foveated_roundness"), "Roundness"), &settings.subrectRoundness, 0.0f, 1.0f, "%.2f");
+			ImGui::SliderInt(T(TKEY("foveated_mask_shape_label"), "Edge Shape"), reinterpret_cast<int*>(&settings.subrectMaskMode), 0, 1,
+				SubrectMaskModeName(GetSubrectMaskMode()));
+			ImGui::SliderFloat(T(TKEY("foveated_falloff_curve"), "Falloff Curve"), &settings.subrectFalloffCurve, 0.5f, 2.0f, "%.2f");
 			break;
 		case SubrectBlendMode::kOuterFeather:
 			ImGui::TextWrapped(T(TKEY("foveated_blend_outer_feather_desc"),

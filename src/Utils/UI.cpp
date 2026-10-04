@@ -9,6 +9,8 @@
 #include "Menu/IconLoader.h"
 #include "Menu/ThemeManager.h"
 #include "PerfUtils.h"
+#include "SceneSettingsManager.h"
+#include "SceneSettingsUIHooks.h"
 #include "ShaderCache.h"
 
 #ifndef DIRECTINPUT_VERSION
@@ -50,6 +52,21 @@
 
 namespace Util
 {
+	void DrawEmbeddedFeatureSettings(Feature& feature)
+	{
+		if (!feature.loaded)
+			return;
+
+		const auto featureName = feature.GetShortName();
+		auto* sceneManager = globals::sceneSettingsManager;
+		const bool sceneControlled = sceneManager->HasActiveSettingsForFeature(featureName) &&
+		                             !sceneManager->IsFeaturePaused(featureName);
+		ImGui::PushID(featureName.c_str());
+		const SKSE::stl::scope_exit restoreID([]() noexcept { ImGui::PopID(); });
+		SceneSettingsUIHooks::FeatureDrawGuard featureDrawGuard(&feature, sceneControlled);
+		feature.DrawSettings();
+	}
+
 	void DrawSelectionButtons(std::span<uint8_t> selected, const char* selectAll, const char* selectNone)
 	{
 		if (ImGui::SmallButton(selectAll))
@@ -1569,6 +1586,20 @@ namespace Util
 			baseColor.w);
 	}
 
+	ImVec4 GetReleaseStageColor(Feature::ReleaseStage stage)
+	{
+		auto& statusPalette = globals::menu->GetTheme().StatusPalette;
+		return stage == Feature::ReleaseStage::Alpha ? statusPalette.Error : statusPalette.Warning;
+	}
+
+	std::string AppendReleaseStageTag(std::string_view label, Feature::ReleaseStage stage)
+	{
+		const auto tag = Feature::GetReleaseStageTag(stage);
+		if (tag.empty())
+			return std::string(label);
+		return std::format("{} {}", label, tag);
+	}
+
 	void DrawSearchIcon(const ImVec2& position, float size, float alpha)
 	{
 		ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -1619,6 +1650,8 @@ namespace Util
 		{
 			SearchableComboState* state = nullptr;
 			ImGuiLastItemData openerItem;
+			float* savedScrollY = nullptr;
+			bool restoreScroll = false;
 		};
 
 		struct SearchableComboStorage
@@ -1748,7 +1781,7 @@ namespace Util
 
 	bool BeginSearchableCombo(
 		const char* label, const char* previewValue, ImGuiComboFlags flags,
-		const void* storageAddress, int maxVisibleItems)
+		const void* storageAddress, int maxVisibleItems, float* savedScrollY)
 	{
 		const ImGuiID id = ImGui::GetID(label);
 		auto& state = detail::GetSearchableComboState(id);
@@ -1774,11 +1807,11 @@ namespace Util
 		const bool continuingOpen = state.open && state.lastOpenFrame == frame - 1 && !popupAppearing;
 		if (state.open && !continuingOpen)
 			detail::ClearSearchableComboFilter(state);
-		const bool focusSearch = !continuingOpen;
+		const bool focusSearch = !continuingOpen && (!savedScrollY || *savedScrollY == 0.0f);
 		state.open = true;
 		state.lastOpenFrame = frame;
 		auto& comboStorage = detail::GetSearchableComboStorage();
-		comboStorage.frames.push_back({ &state, openerItem });
+		comboStorage.frames.push_back({ &state, openerItem, savedScrollY, !continuingOpen });
 
 		ImGui::PushID(id);
 		if (focusSearch)
@@ -1818,6 +1851,12 @@ namespace Util
 			return;
 
 		const ImGuiLastItemData openerItem = storage.frames.back().openerItem;
+		if (auto* savedScrollY = storage.frames.back().savedScrollY) {
+			if (storage.frames.back().restoreScroll)
+				ImGui::SetScrollY(*savedScrollY);
+			else
+				*savedScrollY = ImGui::GetScrollY();
+		}
 		storage.frames.pop_back();
 		ImGui::EndCombo();
 		GImGui->LastItemData = openerItem;
@@ -2034,6 +2073,16 @@ namespace Util
 		ImGui::PopID();
 	}
 
+	TableSortSpec ReadTableSortSpec(int defaultColumn, bool defaultAscending)
+	{
+		TableSortSpec spec{ defaultColumn, defaultAscending };
+		if (const ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs(); sortSpecs && sortSpecs->SpecsCount > 0) {
+			spec.column = sortSpecs->Specs->ColumnIndex;
+			spec.ascending = sortSpecs->Specs->SortDirection == ImGuiSortDirection_Ascending;
+		}
+		return spec;
+	}
+
 	void ShowSortedStringTableStrings(
 		const char* table_id,
 		const std::vector<std::string>& headers,
@@ -2049,22 +2098,15 @@ namespace Util
 				ImGui::TableSetupColumn(header.c_str());
 			ImGui::TableHeadersRow();
 
-			// Determine sorting
-			int sortCol = static_cast<int>(sortColumn);
-			bool sortAsc = ascending;
-			if (const ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs()) {
-				if (sortSpecs->SpecsCount > 0) {
-					sortCol = sortSpecs->Specs->ColumnIndex;
-					sortAsc = sortSpecs->Specs->SortDirection == ImGuiSortDirection_Ascending;
-				}
-			}
+			const TableSortSpec spec = ReadTableSortSpec(static_cast<int>(sortColumn), ascending);
 
 			// Make a copy if sorting is needed
 			std::vector<std::vector<std::string>> sortedRows = rows;
-			if (sortCol >= 0 && static_cast<size_t>(sortCol) < headers.size()) {
+			if (spec.column >= 0 && static_cast<size_t>(spec.column) < headers.size()) {
 				// Fallback to default string sort if no custom sort is provided
-				auto cmp = (sortCol < static_cast<int>(customSorts.size()) && customSorts[sortCol]) ? customSorts[sortCol] : StringSortComparator;
-				std::sort(sortedRows.begin(), sortedRows.end(), [sortCol, sortAsc, &cmp](const std::vector<std::string>& a, const std::vector<std::string>& b) {
+				auto cmp = (spec.column < static_cast<int>(customSorts.size()) && customSorts[spec.column]) ? customSorts[spec.column] : StringSortComparator;
+				const size_t sortCol = static_cast<size_t>(spec.column);
+				SortTableRowsWith<std::vector<std::string>>(sortedRows, spec, [sortCol, &cmp](const std::vector<std::string>& a, const std::vector<std::string>& b, bool sortAsc) {
 					const std::string& aVal = (sortCol < a.size()) ? a[sortCol] : std::string();
 					const std::string& bVal = (sortCol < b.size()) ? b[sortCol] : std::string();
 					return cmp(aVal, bVal, sortAsc);
@@ -2738,7 +2780,6 @@ namespace Util
 		// Draw the toggle knob
 		ImDrawList* drawList = ImGui::GetWindowDrawList();
 		ImVec2 buttonMin = ImGui::GetItemRectMin();
-		ImVec2 buttonMax = ImGui::GetItemRectMax();
 
 		// Calculate knob position and size
 		float knobRadius = (toggleSize.y - 4.0f) * 0.5f;

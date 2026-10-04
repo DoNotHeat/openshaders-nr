@@ -9,6 +9,7 @@
 #include "Menu.h"
 #include "ShaderCache.h"
 #include "State.h"
+#include "TruePBR.h"
 #include "Util.h"
 
 #include "Features/CSUtility.h"
@@ -24,6 +25,7 @@
 #include "Features/Upscaling/FoveatedRender/Bridge.h"
 #include "Features/VR.h"
 #include "Features/VolumetricLighting.h"
+#include "Features/Wind/Wind.h"
 
 #include <optional>
 #include <unordered_map>
@@ -314,6 +316,7 @@ namespace GrassExtensions
 			auto* lightingProperty = *reinterpret_cast<RE::BSLightingShaderProperty**>(lightingPropertyAddress);
 
 			RE::BSLightingShaderProperty* grassProperty = func(property);
+			globals::features::truePBR.SetupGrassMaterial(lightingProperty, grassProperty);
 
 			if (lightingProperty->flags.any(RE::BSShaderProperty::EShaderPropertyFlag::kEffectLighting)) {
 				grassProperty->SetFlags(RE::BSShaderProperty::EShaderPropertyFlag8::kEffectLighting, true);
@@ -330,6 +333,8 @@ namespace GrassExtensions
 		{
 			func(shader, pass, renderFlags);
 			LegacyGraphicsCompatibility::BindLegacyGrassPerGeometryToPixelShader();
+			if (globals::features::wind.loaded)
+				globals::features::wind.UpdateGrassWindSpring();
 
 			auto state = globals::state;
 
@@ -379,6 +384,7 @@ namespace WeatherExtensions
 				globals::features::effects11.OnSkyUpdateColors(sky);
 #endif
 			globals::features::skySync.OnSkyUpdateColors(sky);
+			Feature::ForEachLoadedFeature("OnWeatherColorsUpdated", [sky](Feature* feature) { feature->OnWeatherColorsUpdated(sky); });
 		}
 		static inline REL::Relocation<decltype(thunk)> func;
 	};
@@ -451,6 +457,8 @@ namespace PostProcessingExtensions
 			auto* state = globals::state;
 			const auto input = static_cast<RE::RENDER_TARGET>(a3);
 			const auto output = static_cast<RE::RENDER_TARGET>(a4);
+
+			Feature::ForEachLoadedFeature("OnBeforePostProcessing", [input](Feature* feature) { feature->OnBeforePostProcessing(input); });
 
 			if (state->HandlePostProcessing(input, output))
 				return;
@@ -570,6 +578,8 @@ void Hooks::BSGraphics_SetDirtyStates::thunk(bool isCompute)
 {
 	func(isCompute);
 	globals::state->Draw();
+	if (!isCompute)
+		globals::state->BindVertexPermutationData();
 }
 
 struct ID3D11Device_CreateVertexShader
@@ -925,15 +935,13 @@ namespace Hooks
 				if (shaderCache->IsEnabled()) {
 					auto currentShader = state->currentShader;
 					auto type = currentShader->shaderType.get();
-					if (type > 0 && type < RE::BSShader::Type::Total) {
-						if (state->enabledClasses[type - 1]) {
-							RE::BSGraphics::VertexShader* vertexShader = shaderCache->GetVertexShader(*currentShader, state->modifiedVertexDescriptor);
-							if (vertexShader) {
-								globals::d3d::context->VSSetShader(Util::AsReal(vertexShader->shader), NULL, NULL);
-								*globals::game::currentVertexShader = a_vertexShader;
-								globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
-								return;
-							}
+					if (state->ShaderEnabled(type)) {
+						RE::BSGraphics::VertexShader* vertexShader = shaderCache->GetVertexShader(*currentShader, state->modifiedVertexDescriptor);
+						if (vertexShader) {
+							globals::d3d::context->VSSetShader(Util::AsReal(vertexShader->shader), NULL, NULL);
+							*globals::game::currentVertexShader = a_vertexShader;
+							globals::game::stateUpdateFlags->set(RE::BSGraphics::DIRTY_VERTEX_DESC);
+							return;
 						}
 					}
 				}
@@ -958,14 +966,12 @@ namespace Hooks
 				if (shaderCache->IsEnabled()) {
 					auto currentShader = state->currentShader;
 					auto type = currentShader->shaderType.get();
-					if (type > 0 && type < RE::BSShader::Type::Total) {
-						if (state->enabledClasses[type - 1]) {
-							RE::BSGraphics::PixelShader* pixelShader = shaderCache->GetPixelShader(*currentShader, state->modifiedPixelDescriptor);
-							if (pixelShader) {
-								globals::d3d::context->PSSetShader(Util::AsReal(pixelShader->shader), NULL, NULL);
-								*globals::game::currentPixelShader = a_pixelShader;
-								return;
-							}
+					if (state->ShaderEnabled(type)) {
+						RE::BSGraphics::PixelShader* pixelShader = shaderCache->GetPixelShader(*currentShader, state->modifiedPixelDescriptor);
+						if (pixelShader) {
+							globals::d3d::context->PSSetShader(Util::AsReal(pixelShader->shader), NULL, NULL);
+							*globals::game::currentPixelShader = a_pixelShader;
+							return;
 						}
 					}
 				}
@@ -1079,7 +1085,7 @@ namespace Hooks
 				auto shaderCache = globals::shaderCache;
 				auto& vl = globals::features::volumetricLighting;
 
-				if (state->enabledClasses[RE::BSShader::Type::ImageSpace]) {
+				if (state->ShaderEnabled(RE::BSShader::Type::ImageSpace)) {
 					RE::BSImagespaceShader* isShader = CurrentlyDispatchedShader;
 					uint32_t techniqueId = CurrentComputeShaderTechniqueId;
 					if (vl.loaded) {
@@ -1094,12 +1100,12 @@ namespace Hooks
 							techniqueId = 0;
 							isShader = vl.GetOrCreateBlurHCS(CurrentlyDispatchedComputeShader);
 							vl.SetDimensionsCB();
-							vl.SetGroupCountsHCS(threadGroupCountX);
+							vl.SetGroupCountsHCS(threadGroupCountX, threadGroupCountY);
 						} else if (CurrentlyDispatchedComputeShader->name == "ISVolumetricLightingBlurVCS"sv) {
 							techniqueId = 0;
 							isShader = vl.GetOrCreateBlurVCS(CurrentlyDispatchedComputeShader);
 							vl.SetDimensionsCB();
-							vl.SetGroupCountsVCS(threadGroupCountY);
+							vl.SetGroupCountsVCS(threadGroupCountX, threadGroupCountY);
 						}
 					}
 					if (isShader != nullptr) {
@@ -1184,44 +1190,36 @@ namespace Hooks
 #endif
 	}
 
+	bool ShouldSkipRenderPassForFeatures(const RE::BSRenderPass* a_pass)
+	{
+		constexpr bool kEmitGpuZone = false;
+		constexpr bool kEmitCpuZone = false;
+		bool skip = false;
+		Feature::ForEachLoadedFeature(
+			Feature::GetRenderPassSkipFeatures(), "ShouldSkipRenderPass",
+			[&](Feature* feature) { skip = skip || feature->ShouldSkipRenderPass(a_pass); },
+			kEmitGpuZone, kEmitCpuZone);
+		return skip;
+	}
+
 	// Generic per-render-pass hook: gives every feature that opted in via
 	// Feature::WantsRenderPassHook() a chance to react to a qualifying render pass, without this
 	// file naming any specific feature. See Feature::OnRenderPassBegin().
-	class RenderPassHookScope
-	{
-	public:
-		explicit RenderPassHookScope(const RE::BSRenderPass* a_pass)
-		{
-			Feature::ForEachLoadedFeature(Feature::GetRenderPassHookFeatures(), "OnRenderPassBegin",
-				[&](Feature* feature) {
-					if (auto cleanup = feature->OnRenderPassBegin(a_pass))
-						cleanups.push_back(std::move(cleanup));
-				});
-		}
-
-		~RenderPassHookScope()
-		{
-			for (auto it = cleanups.rbegin(); it != cleanups.rend(); ++it)
-				(*it)();
-		}
-
-	private:
-		std::vector<std::function<void()>> cleanups;
-	};
-
 	void BSBatchRenderer_RenderPassImmediately1::thunk(
 		RE::BSRenderPass* a_pass,
 		uint32_t a_technique,
 		bool a_alphaTest,
 		uint32_t a_renderFlags)
 	{
-		if (ShouldSkipRenderPassForParticleLights(a_pass, a_technique))
+		if (ShouldSkipRenderPassForParticleLights(a_pass, a_technique) ||
+			ShouldSkipRenderPassForFeatures(a_pass))
 			return;
 
 		// No vector/std::function machinery touched at all until a feature opts in.
-		std::optional<RenderPassHookScope> renderPassHookScope;
+		std::optional<Feature::RenderScope> renderPassHookScope;
 		if (!Feature::GetRenderPassHookFeatures().empty())
-			renderPassHookScope.emplace(a_pass);
+			renderPassHookScope.emplace(Feature::GetRenderPassHookFeatures(), "OnRenderPassBegin",
+				[a_pass](Feature* feature) { return feature->OnRenderPassBegin(a_pass); });
 		func(a_pass, a_technique, a_alphaTest, a_renderFlags);
 	}
 
@@ -1231,12 +1229,14 @@ namespace Hooks
 		bool a_alphaTest,
 		uint32_t a_renderFlags)
 	{
-		if (ShouldSkipRenderPassForParticleLights(a_pass, a_technique))
+		if (ShouldSkipRenderPassForParticleLights(a_pass, a_technique) ||
+			ShouldSkipRenderPassForFeatures(a_pass))
 			return;
 
-		std::optional<RenderPassHookScope> renderPassHookScope;
+		std::optional<Feature::RenderScope> renderPassHookScope;
 		if (!Feature::GetRenderPassHookFeatures().empty())
-			renderPassHookScope.emplace(a_pass);
+			renderPassHookScope.emplace(Feature::GetRenderPassHookFeatures(), "OnRenderPassBegin",
+				[a_pass](Feature* feature) { return feature->OnRenderPassBegin(a_pass); });
 		func(a_pass, a_technique, a_alphaTest, a_renderFlags);
 	}
 
@@ -1246,12 +1246,14 @@ namespace Hooks
 		bool a_alphaTest,
 		uint32_t a_renderFlags)
 	{
-		if (ShouldSkipRenderPassForParticleLights(a_pass, a_technique))
+		if (ShouldSkipRenderPassForParticleLights(a_pass, a_technique) ||
+			ShouldSkipRenderPassForFeatures(a_pass))
 			return;
 
-		std::optional<RenderPassHookScope> renderPassHookScope;
+		std::optional<Feature::RenderScope> renderPassHookScope;
 		if (!Feature::GetRenderPassHookFeatures().empty())
-			renderPassHookScope.emplace(a_pass);
+			renderPassHookScope.emplace(Feature::GetRenderPassHookFeatures(), "OnRenderPassBegin",
+				[a_pass](Feature* feature) { return feature->OnRenderPassBegin(a_pass); });
 		func(a_pass, a_technique, a_alphaTest, a_renderFlags);
 	}
 

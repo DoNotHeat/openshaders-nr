@@ -1,4 +1,5 @@
 #include "MotionBlur.h"
+#include "Features/PostProcessing.h"
 #include "Features/Upscaling.h"
 #include "GpuPass.h"
 #include "ShaderCache.h"
@@ -12,6 +13,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
 	VelocityScale,
 	SampleCount,
 	ScalePreset)
+
+bool MotionBlur::DrawBeforeUpscaling() const
+{
+	// Motion vectors stay at render resolution when the pipeline processes a larger provided scene.
+	return owner && owner->ProcessesProvidedInput();
+}
 
 void MotionBlur::SetupResources()
 {
@@ -71,10 +78,10 @@ void MotionBlur::SetupResources()
 void MotionBlur::CompileComputeShaders()
 {
 	const std::vector<ComputeShaderCompileInfo> shaderInfos = {
-		{ &horizontalPassShader, "motionblur_horizontalpass.cs.hlsl" },
-		{ &verticalPassShader, "motionblur_verticalpass.cs.hlsl" },
-		{ &neighborMaxPassShader, "motionblur_neighborpass.cs.hlsl" },
-		{ &blurPassShader, "motionblur_blurpass.cs.hlsl" },
+		{ &horizontalPassShader, "motionblur_horizontalpass.cs.hlsl", {} },
+		{ &verticalPassShader, "motionblur_verticalpass.cs.hlsl", {} },
+		{ &neighborMaxPassShader, "motionblur_neighborpass.cs.hlsl", {} },
+		{ &blurPassShader, "motionblur_blurpass.cs.hlsl", {} },
 	};
 
 	CompileComputeShadersAsync(L"Data\\Shaders\\PostProcessing\\MotionBlur", shaderInfos);
@@ -134,9 +141,18 @@ void MotionBlur::DrawSettings()
 		"Very Short", "Short", "Medium", "Long", "Very Long"
 	};
 
+	const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr;
+	ImGui::BeginDisabled(cam != nullptr);
 	int preset = static_cast<int>(settings.ScalePreset);
 	if (ImGui::Combo("Motion Length", &preset, presets, IM_ARRAYSIZE(presets))) {
 		settings.ScalePreset = static_cast<MotionScale>(preset);
+	}
+
+	ImGui::EndDisabled();
+	if (cam) {
+		ImGui::TextDisabled(T("feature.post_processing.motion_blur.effective_shutter_scale", "Effective Velocity Scale (shutter %.0f degrees): %.0f"),
+			cam->ShutterAngleDeg,
+			std::clamp(CinematicCamera::kMotionBlurReferenceScale * cam->ShutterAngleDeg / 180.0f, 10.0f, 800.0f));
 	}
 
 	// Samples (each UI sample represents 2 actual samples)
@@ -355,6 +371,8 @@ bool MotionBlur::UpdateConstantBuffers()
 
 	// Get actual velocity scale value from preset
 	float velocityScale = GetScaleValueFromPreset(settings.ScalePreset);
+	if (const auto* cam = owner ? owner->GetActivePhysicalCameraState() : nullptr)
+		velocityScale = std::clamp(CinematicCamera::kMotionBlurReferenceScale * cam->ShutterAngleDeg / 180.0f, 10.0f, 800.0f);
 	float2 velocityTextureScale = { 1.0f, 1.0f };
 	float2 targetResolution = { static_cast<float>(lastWidth), static_cast<float>(lastHeight) };
 

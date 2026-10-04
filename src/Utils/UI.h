@@ -14,6 +14,7 @@
 #include <vector>
 #include <windows.h>  // For WPARAM and virtual key constants
 
+#include "../Feature.h"
 #include "../FeatureConstraints.h"
 #include "../Menu/Fonts.h"
 #include "../Menu/ThemeManager.h"
@@ -27,7 +28,6 @@ struct ID3D11ShaderResourceView;
 struct ImRect;
 struct ImVec2;
 class Menu;
-class Feature;
 
 // Helper macro for displaying texture buffers in ImGui with resolution info
 #define BUFFER_VIEWER_NODE_IMPL(a_value, a_label, a_scale)                                                       \
@@ -47,7 +47,7 @@ class Feature;
 	BUFFER_VIEWER_NODE_IMPL(a_value, a_title, a_scale)
 
 #define BUFFER_VIEWER_NODE_BULLET(a_value, a_scale) \
-	ImGui::BulletText(#a_value);                    \
+	ImGui::BulletText("%s", #a_value);              \
 	ImGui::Image(a_value->srv.get(), { a_value->desc.Width * a_scale, a_value->desc.Height * a_scale });
 
 #define ADDRESS_NODE(a_value)                                                                        \
@@ -55,7 +55,7 @@ class Feature;
 		ImGui::SetClipboardText(std::format("{0:x}", reinterpret_cast<uintptr_t>(a_value)).c_str()); \
 	}                                                                                                \
 	if (ImGui::IsItemHovered())                                                                      \
-		ImGui::SetTooltip(std::format("Copy {} Address to Clipboard", #a_value).c_str());
+		ImGui::SetTooltip("%s", std::format("Copy {} Address to Clipboard", #a_value).c_str());
 
 namespace Util
 {
@@ -668,6 +668,44 @@ namespace Util
 	// Table sort function for string columns
 	using TableSortFunc = std::function<bool(const std::string&, const std::string&, bool)>;
 	using TableCellRenderFunc = std::function<void(int row, int col, const std::string& value)>;
+	/** @brief Row comparator for one column of a sortable table: (a, b, ascending) -> a before b. */
+	template <typename T>
+	using TableRowSortFunc = std::function<bool(const T&, const T&, bool)>;
+
+	/** @brief The column a sortable table is sorted by and the direction. column -1 = leave the rows as they are. */
+	struct TableSortSpec
+	{
+		int column = -1;
+		bool ascending = true;
+	};
+
+	/**
+	 * @brief Reads the current table's sort specs (between BeginTable and EndTable).
+	 * Falls back to the defaults when the table has no active sort: a table that is not
+	 * sortable, or a tristate one the user has un-sorted. Pass -1 to leave the rows as they are then.
+	 */
+	TableSortSpec ReadTableSortSpec(int defaultColumn = -1, bool defaultAscending = true);
+
+	/** @brief Stable-sorts rows with one comparator, unless the spec says to leave them as they are. */
+	template <typename T>
+	void SortTableRowsWith(std::vector<T>& rows, const TableSortSpec& spec, const TableRowSortFunc<T>& comparator)
+	{
+		if (spec.column < 0 || !comparator)
+			return;
+		const bool ascending = spec.ascending;
+		std::stable_sort(rows.begin(), rows.end(), [&comparator, ascending](const T& a, const T& b) {
+			return comparator(a, b, ascending);
+		});
+	}
+
+	/** @brief Stable-sorts rows by the spec's column with that column's comparator; a column without one leaves the rows as they are. */
+	template <typename T>
+	void SortTableRows(std::vector<T>& rows, const TableSortSpec& spec, const std::vector<TableRowSortFunc<T>>& customSorts)
+	{
+		if (spec.column < 0 || static_cast<size_t>(spec.column) >= customSorts.size())
+			return;
+		SortTableRowsWith(rows, spec, customSorts[spec.column]);
+	}
 
 	/**
 	 * Renders a sortable ImGui table for string tables (vector<vector<string>>).
@@ -740,23 +778,7 @@ namespace Util
 			}
 			ImGui::TableHeadersRow();
 
-			// Interactive sorting
-			int sortCol = static_cast<int>(sortColumn);
-			bool sortAsc = ascending;
-			if (const ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs()) {
-				if (sortSpecs->SpecsCount > 0) {
-					sortCol = sortSpecs->Specs->ColumnIndex;
-					sortAsc = sortSpecs->Specs->SortDirection == ImGuiSortDirection_Ascending;
-				}
-			}
-			if (sortCol >= 0 && static_cast<size_t>(sortCol) < headers.size()) {
-				if (sortCol < static_cast<int>(customSorts.size()) && customSorts[sortCol]) {
-					auto cmp = customSorts[sortCol];
-					std::sort(rows.begin(), rows.end(), [sortCol, sortAsc, &cmp](const T& a, const T& b) {
-						return cmp(a, b, sortAsc);
-					});
-				}
-			}
+			SortTableRows(rows, ReadTableSortSpec(static_cast<int>(sortColumn), ascending), customSorts);
 
 			// Render main (sorted) rows
 			for (size_t rowIdx = 0; rowIdx < rows.size(); ++rowIdx) {
@@ -957,10 +979,10 @@ namespace Util
 	/** @brief Allocation-free label accessor for indexed searchable combos. */
 	using SearchableComboLabelGetter = const char* (*)(const void* userData, int index);
 
-	/** @brief Begins a constrained combo with a focused search field. Call EndSearchableCombo when true. */
+	/** @brief Begins a searchable combo, optionally restoring caller-owned scroll position. Call EndSearchableCombo when true. */
 	bool BeginSearchableCombo(const char* label, const char* previewValue,
 		ImGuiComboFlags flags = ImGuiComboFlags_None, const void* storageAddress = nullptr,
-		int maxVisibleItems = 0);
+		int maxVisibleItems = 0, float* savedScrollY = nullptr);
 
 	/** @brief Ends a combo opened by BeginSearchableCombo. */
 	void EndSearchableCombo();
@@ -1070,11 +1092,30 @@ namespace Util
 	ImVec4 GetPulsingColor(const ImVec4& baseColor, float speed = 4.0f, float minBrightness = 0.7f, float maxBrightness = 1.0f);
 
 	/**
+	 * @brief Color for an [ALPHA]/[BETA] release-stage marker: Alpha (less stable) reads as an
+	 * error, Beta as a warning.
+	 */
+	ImVec4 GetReleaseStageColor(Feature::ReleaseStage stage);
+
+	/**
+	 * @brief Appends the localized release-stage marker ("[ALPHA]"/"[BETA]") to a label for use as
+	 * a single-color widget label (tab item, tree node, collapsing header, selectable...). Returns
+	 * label unchanged for Feature::ReleaseStage::Release. Unlike the sidebar and feature-header tag
+	 * rendering, this does not color the marker separately from the rest of the label: those two
+	 * draw a colored overlay because their layout has room for one, which a tab bar's single-string
+	 * label does not.
+	 */
+	std::string AppendReleaseStageTag(std::string_view label, Feature::ReleaseStage stage);
+
+	/**
 	 * @brief Draws the feature search bar with magnifying glass icon.
 	 * @param searchString Reference to the search string to modify
 	 * @param availableWidth The available width for the search bar
 	 */
 	void DrawFeatureSearchBar(std::string& searchString, float availableWidth = 0.0f);
+
+	/** @brief Draws loaded feature controls with their own settings context inside another page. */
+	void DrawEmbeddedFeatureSettings(Feature& feature);
 
 	/**
 	 * Provides access to theme-aware UI colors for consistent styling.
@@ -1658,23 +1699,7 @@ namespace Util
 			}
 			ImGui::TableHeadersRow();
 
-			// Interactive sorting
-			int sortCol = static_cast<int>(sortColumn);
-			bool sortAsc = ascending;
-			if (const ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs()) {
-				if (sortSpecs->SpecsCount > 0) {
-					sortCol = sortSpecs->Specs->ColumnIndex;
-					sortAsc = sortSpecs->Specs->SortDirection == ImGuiSortDirection_Ascending;
-				}
-			}
-			if (sortCol >= 0 && static_cast<size_t>(sortCol) < columns.size()) {
-				if (sortCol < static_cast<int>(customSorts.size()) && customSorts[sortCol]) {
-					auto cmp = customSorts[sortCol];
-					std::sort(filteredRows.begin(), filteredRows.end(), [sortCol, sortAsc, &cmp](const T& a, const T& b) {
-						return cmp(a, b, sortAsc);
-					});
-				}
-			}
+			SortTableRows(filteredRows, ReadTableSortSpec(static_cast<int>(sortColumn), ascending), customSorts);
 
 			// Sort/filter above must stay before this clipper, or only visible rows sort.
 			ImGuiListClipper clipper;

@@ -25,7 +25,7 @@ option(
 project(
     # gersemi: ignore
     CommunityShaders
-    VERSION 2.12.0
+    VERSION 2.17.0
     LANGUAGES CXX
 )
 
@@ -71,7 +71,7 @@ option(
 )
 option(
     SKIP_RUNTIME_DOWNLOADS
-    "Skip redistributable runtime downloads for DLL-only development builds."
+    "Skip the FidelityFX and Streamline runtime DLL downloads for an offline DLL-only build. Packaging needs those DLLs: a package install fails on the absent files, and AIO_ZIP_TO_DIST fails to configure while they are missing."
     OFF
 )
 message("\tAuto plugin deployment: ${AUTO_PLUGIN_DEPLOYMENT}")
@@ -180,6 +180,18 @@ target_include_directories(
         ${EXPRTK_INCLUDE_DIRS}
 )
 
+# Vendored third-party API headers (FidelityFX's api/ vendor copy, TDM's
+# plugin API) aren't held to this project's warning policy. They live under
+# their own root (not include/, which also holds our own PCH.h, VRAPI/, etc.)
+# specifically so SYSTEM here suppresses only their warnings -- SYSTEM applies
+# per include-directory entry, not per subtree, so it can't be scoped within
+# a directory shared with headers we don't want suppressed.
+target_include_directories(
+    ${PROJECT_NAME}
+    SYSTEM
+    PRIVATE "${CMAKE_SOURCE_DIR}/vendor/include"
+)
+
 # ImGuiVRHelper client API — fetched from upstream so the dependency and its
 # pinned version are explicit instead of a vendored copy. Configures only the
 # helper's api/ CMake target (SOURCE_SUBDIR) and skips its submodules. The
@@ -198,6 +210,13 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(ImGuiVRHelper)
 target_link_libraries(${PROJECT_NAME} PRIVATE ImGuiVRHelper::api)
+
+target_include_directories(
+    ${PROJECT_NAME}
+    SYSTEM
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/extern/Streamline-DX12/external/ngx-sdk/include"
+)
 
 # stb_image_write impl (incl. ReShade's vendored HDR-PNG extension) builds as C, like
 # upstream's deps/stb_impl.c: the extension passes unsigned char* where stb's
@@ -234,6 +253,7 @@ target_link_libraries(
         Tracy::TracyClient
         Streamline
         d3d12.lib
+        bcrypt.lib
         Microsoft::DirectX-Headers
         ${DETOURS_LIBRARY}
         windowsapp
@@ -256,6 +276,16 @@ if(MSVC)
     # Large translation units (e.g. LightLimitFix/ShadowCasterUI.cpp pulling the
     # full feature + editor headers) exceed the default COFF section limit; /bigobj.
     target_compile_options(${PROJECT_NAME} PRIVATE "/bigobj")
+endif()
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    # A designated initializer that intentionally sets only some fields
+    # (the rest correctly zero-init) is idiomatic C++20, not an omission;
+    # this diagnostic has no equivalent under real MSVC's warning set.
+    target_compile_options(
+        ${PROJECT_NAME}
+        PRIVATE "-Wno-missing-designated-field-initializers"
+    )
 endif()
 
 # https://gitlab.kitware.com/cmake/cmake/-/issues/24922#note_1371990
@@ -733,9 +763,28 @@ install(
     PATTERN "Tests" EXCLUDE
 )
 include(FeaturePackaging)
-if(NOT SKIP_RUNTIME_DOWNLOADS)
-    include(FidelityFX-Runtime)
-    include(Streamline-Runtime)
+include(FidelityFX-Runtime)
+include(Streamline-Runtime)
+# A package install fails on a payload file a skipped download left absent, so the only
+# path left to guard is the AIO archive, which is staged from the tree rather than installed.
+if(SKIP_RUNTIME_DOWNLOADS)
+    set(_runtime_payload_missing
+        ${FFX_RUNTIME_PAYLOAD_MISSING}
+        ${STREAMLINE_RUNTIME_PAYLOAD_MISSING}
+        ${STREAMLINE_RUNTIME_DX12_PAYLOAD_MISSING}
+    )
+    if(_runtime_payload_missing AND AIO_ZIP_TO_DIST)
+        message(
+            FATAL_ERROR
+            "SKIP_RUNTIME_DOWNLOADS is ON and the FidelityFX and Streamline runtime DLLs are not on disk, but AIO_ZIP_TO_DIST archives the shader tree without them. Reconfigure with -DSKIP_RUNTIME_DOWNLOADS=OFF to fetch them, or turn off AIO_ZIP_TO_DIST."
+        )
+    endif()
+    if(_runtime_payload_missing)
+        message(
+            WARNING
+            "SKIP_RUNTIME_DOWNLOADS is ON and the FidelityFX and Streamline runtime DLLs are not on disk: this build cannot package them, and a package install will fail until a configure without the option fetches them."
+        )
+    endif()
 endif()
 install(CODE "file(REMOVE \${CMAKE_INSTALL_PREFIX}/Core)" COMPONENT Shaders)
 
@@ -960,14 +1009,50 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
         "${_feature_shader_paths_file_content}"
     )
 
-    list(
-        APPEND _shader_copy_cmds
-        COMMAND
-        ${CMAKE_COMMAND}
+    set(_preserve_runtime_args)
+    if(SKIP_RUNTIME_DOWNLOADS)
+        set(_preserve_runtime_prefixes_file
+            "${CMAKE_CURRENT_BINARY_DIR}/preserve_runtime_prefixes.txt"
+        )
+        set(_runtime_payload_directories
+            "${FFX_RUNTIME_RELATIVE_DIRECTORY}"
+            "${STREAMLINE_RUNTIME_RELATIVE_DIRECTORY}"
+            "${STREAMLINE_RUNTIME_DX12_RELATIVE_DIRECTORY}"
+        )
+        string(
+            REPLACE "Shaders/"
+            ""
+            _runtime_payload_prefixes
+            "${_runtime_payload_directories}"
+        )
+        string(
+            REPLACE ";"
+            "\n"
+            _runtime_payload_prefixes
+            "${_runtime_payload_prefixes}"
+        )
+        file(
+            WRITE "${_preserve_runtime_prefixes_file}"
+            "${_runtime_payload_prefixes}"
+        )
+        list(
+            APPEND _preserve_runtime_args
+            -DPRESERVE_RUNTIME_PREFIXES_FILE="${_preserve_runtime_prefixes_file}"
+        )
+    endif()
+
+    set(_shader_cleanup_args
         -DMODE=SHADERS
         -DAIO_DIR="${AIO_DIR}"
         -DSOURCE_DIR="${CMAKE_SOURCE_DIR}"
         -DFEATURE_SHADER_PATHS_FILE="${_feature_shader_paths_list_file}"
+        ${_preserve_runtime_args}
+    )
+    list(
+        APPEND _shader_copy_cmds
+        COMMAND
+        ${CMAKE_COMMAND}
+        ${_shader_cleanup_args}
         -P
         "${CMAKE_SOURCE_DIR}/cmake/CleanupStaleEntries.cmake"
     )
@@ -1009,6 +1094,7 @@ if(AUTO_PLUGIN_DEPLOYMENT OR AIO_ZIP_TO_DIST)
             ${_package_shaders}
             ${_all_feature_shader_files}
             ${CMAKE_SOURCE_DIR}/cmake/CleanupStaleEntries.cmake
+            ${CMAKE_SOURCE_DIR}/cmake/PreservedRuntimePaths.cmake
         COMMENT "Copying changed shaders into AIO/Shaders"
     )
 
@@ -1182,7 +1268,8 @@ if(AUTO_PLUGIN_DEPLOYMENT)
                 OUTPUT ${DEPLOY_TARGET_HASH}_shaders_only.stamp
                 COMMAND
                     ${CMAKE_COMMAND} -DSRC_DIR="${AIO_DIR}/Shaders"
-                    -DDST_DIR="${DEPLOY_TARGET}/Shaders" -P
+                    -DDST_DIR="${DEPLOY_TARGET}/Shaders"
+                    ${_preserve_runtime_args} -P
                     "${CMAKE_SOURCE_DIR}/cmake/SyncShaderDeploy.cmake"
                 COMMAND
                     ${CMAKE_COMMAND} -E touch
@@ -1192,6 +1279,7 @@ if(AUTO_PLUGIN_DEPLOYMENT)
                     prepare_shaders
                     ${CMAKE_CURRENT_BINARY_DIR}/copy_shaders.stamp
                     ${CMAKE_SOURCE_DIR}/cmake/SyncShaderDeploy.cmake
+                    ${CMAKE_SOURCE_DIR}/cmake/PreservedRuntimePaths.cmake
                 COMMENT "Fast shader-only deploy to ${DEPLOY_TARGET}/Shaders"
             )
 
@@ -1207,7 +1295,8 @@ if(AUTO_PLUGIN_DEPLOYMENT)
                 OUTPUT ${DEPLOY_TARGET_HASH}_shaders_full.stamp
                 COMMAND
                     ${CMAKE_COMMAND} -DSRC_DIR="${AIO_DIR}/Shaders"
-                    -DDST_DIR="${DEPLOY_TARGET}/Shaders" -P
+                    -DDST_DIR="${DEPLOY_TARGET}/Shaders"
+                    ${_preserve_runtime_args} -P
                     "${CMAKE_SOURCE_DIR}/cmake/SyncShaderDeploy.cmake"
                 COMMAND
                     ${CMAKE_COMMAND} -E touch
@@ -1227,6 +1316,7 @@ if(AUTO_PLUGIN_DEPLOYMENT)
                     ${_package_shaders}
                     ${_all_feature_shader_files}
                     ${CMAKE_SOURCE_DIR}/cmake/SyncShaderDeploy.cmake
+                    ${CMAKE_SOURCE_DIR}/cmake/PreservedRuntimePaths.cmake
                     ${CMAKE_CURRENT_BINARY_DIR}/${DEPLOY_TARGET_HASH}_deploy.stamp
                 COMMENT
                     "Full shader deploy to ${DEPLOY_TARGET}/Shaders (with PREPARE_AIO)"

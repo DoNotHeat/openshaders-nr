@@ -1,8 +1,5 @@
 #pragma once
 
-#define TDM_API_COMMONLIB
-#include "TDM/TrueDirectionalMovementAPI.h"
-
 #include "Buffer.h"
 #include "PostProcessFeature.h"
 
@@ -14,6 +11,7 @@ struct DoF : public PostProcessFeature
 	virtual inline std::string GetDisplayName() const override { return T("feature.post_processing.do_f.name", "Depth of Field"); }
 	virtual inline std::string GetDesc() const override { return T("feature.post_processing.do_f.description", "Depth of Field, based on CinematicDOF by Frans Bouma."); }
 	virtual inline bool DisableInMainLoadingMenu() const override { return true; }
+	virtual bool DrawBeforeUpscaling() const override;
 
 	struct Settings
 	{
@@ -23,6 +21,7 @@ struct DoF : public PostProcessFeature
 		float ManualFocusPlane = 0.4f;
 		float FocalLength = 50.0f;
 		float FNumber = 2.8f;
+		float SensorWidthMM = 36.0f;
 		float FarPlaneMaxBlur = 1.0f;
 		float NearPlaneMaxBlur = 1.0f;
 		bool UseAdaptiveGather = true;
@@ -79,9 +78,10 @@ struct DoF : public PostProcessFeature
 		uint BokehBladeCount;
 		float BokehBladeRoundness;
 		float ProceduralBokehAreaScale;
-		uint pad;
+		float SensorWidthMM;
+		float4 BufferDim;
 	};
-	static_assert(sizeof(DoFCB) == 128, "DoFCB must match the cbuffer layout in dof.cs.hlsl");
+	static_assert(sizeof(DoFCB) == 144, "DoFCB must match the cbuffer layout in dof.cs.hlsl");
 
 	eastl::unique_ptr<ConstantBuffer> dofCB = nullptr;
 	eastl::unique_ptr<StructuredBuffer> proceduralBokehSamples = nullptr;
@@ -141,15 +141,9 @@ struct DoF : public PostProcessFeature
 	virtual void DrawSettings() override;
 
 	virtual void Draw(TextureInfo&) override;
-	void UpdateProceduralBokehSamples(bool force = false);
+	void UpdateProceduralBokehSamples(int bladeCount, float bladeRoundness, bool force = false);
 
-	RE::NiPoint3 GetCameraPos();
-	bool GetInDialogue();
-	bool GetTargetLockEnabled();
-	float GetDistanceToReference(RE::TESObjectREFR* a_ref);
 	float debugDistance = 0.0f;
 	float debugFocusPlane = 0.0f;
 	uint currentRef = 0;
-
-	TDM_API::IVTDM2* g_TDM = nullptr;
 };

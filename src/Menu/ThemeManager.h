@@ -37,7 +37,6 @@ using json = nlohmann::json;
  *     ],
  *
  *     "TooltipHoverDelay": 0.5,            // Seconds before tooltip appears
- *     "ShowActionIcons": true,             // Show icons on action buttons
  *     "UseCustomCursor": false,
  *     "Cursor": {
  *       "Scale": 1.0,
@@ -191,6 +190,15 @@ public:
 		static constexpr float BUTTON_PADDING = 16.0f;
 		static constexpr float BUTTON_SPACING = 8.0f;
 		static constexpr float OVERLAY_WINDOW_POSITION = 10.0f;
+		static constexpr float LIGHT_LIMIT_OVERLAY_WIDTH = 640.0f;
+		static constexpr float LIGHT_LIMIT_OVERLAY_HEIGHT = 480.0f;
+		static constexpr float LIGHT_LIMIT_OVERLAY_MIN_WIDTH = 440.0f;
+		static constexpr float LIGHT_LIMIT_OVERLAY_MIN_HEIGHT = 320.0f;
+		static constexpr float SHADOW_LIGHT_FILTER_WIDTH = 180.0f;
+		static constexpr float SHADOW_LIGHT_SWATCH_WIDTH = 22.0f;
+		static constexpr float SHADOW_LIGHT_SWATCH_HEIGHT = 16.0f;
+		static constexpr float SHADOW_VRAM_OUTLINE_WIDTH = 2.0f;
+		static constexpr int SHADOW_FORMULA_VISIBLE_ROWS = 12;
 		static constexpr float FONT_CACHE_EPSILON = 0.01f;
 		static constexpr float CURSOR_POSITION_PADDING = 14.0f;
 		static constexpr float SEPARATOR_THICKNESS = 3.0f;
@@ -198,6 +206,10 @@ public:
 		static constexpr float POPUP_BUTTON_WIDTH = 180.0f;
 		static constexpr float DIALOG_RESIZE_RESPONSE = 20.0f;
 		static constexpr float EDITOR_VIEWPORT_BACKGROUND_DIM_ALPHA = 0.35f;  // Extra backdrop dim while the CS Editor viewport is open
+		static constexpr float EDITOR_BROWSER_SIDEBAR_WIDTH = 180.0f;
+		static constexpr float EDITOR_MENU_SIDEBAR_WIDTH = 198.0f;
+		static constexpr float EDITOR_BROWSER_HEADER_PADDING = 8.0f;
+		static constexpr float EDITOR_BROWSER_CHEVRON_SCALE = 0.85f;
 
 		// Feature header constants
 		static constexpr float DEFAULT_FEATURE_TITLE_SCALE = 1.5f;  // Default scale for feature title text
@@ -208,6 +220,7 @@ public:
 		static constexpr float AUTOHIDE_EXPAND_DELAY = 0.25f;           // Delay before expanding panel (seconds)
 		static constexpr float AUTOHIDE_PANEL_WIDTH_RATIO = 0.2f;       // Ratio of window width for panel (2/10)
 		static constexpr float SIDEBAR_SLIDE_DURATION = 0.15f;
+		static constexpr float SIDEBAR_ROW_FADE_DURATION = 0.15f;
 
 		// Scene settings panel constants (multipliers of ImGui::GetFontSize())
 		static constexpr float SCENE_TOD_PARAM_COL_EM = 5.0f;            // Parameter column width (TOD table)

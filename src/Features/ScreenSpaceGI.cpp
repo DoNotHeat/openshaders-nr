@@ -188,7 +188,7 @@ void ScreenSpaceGI::DrawSettings()
 				recompileFlag = true;
 			}
 			if (auto _tt = Util::HoverTooltipWrapper()) {
-				ImGui::Text(select("1 Slice, 6 Steps, blur enabled, no GI\n", "3 Slices, 8 Steps, blur enabled, no GI\n"));
+				ImGui::TextUnformatted(select("1 Slice, 6 Steps, blur enabled, no GI\n", "3 Slices, 8 Steps, blur enabled, no GI\n"));
 			}
 
 			ImGui::TableNextColumn();
@@ -975,8 +975,7 @@ void ScreenSpaceGI::DrawSSGI()
 	//////////////////////////////////////////////////////
 
 	context->CSSetConstantBuffers(1, 1, &cb);
-	auto* sharedDataBuf = globals::state->sharedDataCB->CB();
-	context->CSSetConstantBuffers(5, 1, &sharedDataBuf);
+	globals::state->BindSharedDataCS(context, false);
 	context->CSSetSamplers(0, (uint)samplers.size(), samplers.data());
 
 	// prefilter depths

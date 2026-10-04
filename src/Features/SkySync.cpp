@@ -138,7 +138,7 @@ void SkySync::DrawSettings()
 			ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
 			ImGui::Text(T(TKEY("debug_transitioning"), "Transitioning %.0f%%"), t * 100.0f);
 		} else {
-			ImGui::TextDisabled(T(TKEY("debug_no_transition"), "No transition"));
+			ImGui::TextDisabled("%s", T(TKEY("debug_no_transition"), "No transition"));
 		}
 
 		ImGui::TreePop();
@@ -231,6 +231,25 @@ void SkySync::OnSkyUpdateColors(RE::Sky* sky)
 	}
 }
 
+std::optional<float3> SkySync::GetCelestialLightWeights() const
+{
+	if (!loaded || !settings.Enabled || !celestialLightingValid)
+		return std::nullopt;
+
+	return shadowFader.lightWeights;
+}
+
+std::optional<RE::NiPoint3> SkySync::GetCelestialLightDirection() const
+{
+	const auto sky = globals::game::sky;
+	if (!loaded || !settings.Enabled || !celestialLightingValid || !sky || !sky->root)
+		return std::nullopt;
+
+	auto direction = sky->root->world.rotate * shadowFader.celestialDir;
+	direction.Unitize();
+	return direction;
+}
+
 void SkySync::Sky_Update::thunk(RE::Sky* sky)
 {
 	func(sky);
@@ -248,6 +267,7 @@ void SkySync::PreparePendingTransitions()
 
 	if (request.gameLoad) {
 		shadowFader.Reset();
+		celestialLightingValid = false;
 		currentCell = nullptr;
 		currentCellInterior = false;
 		currentCellWorldspace = nullptr;
@@ -259,6 +279,7 @@ void SkySync::PreparePendingTransitions()
 
 bool SkySync::Update(const RE::Sky* sky)
 {
+	celestialLightingValid = false;
 	if (!settings.Enabled) {
 		currentDim = 1.0f;
 		const bool transitionCompleted = immediateTransitionReady;
@@ -372,6 +393,7 @@ bool SkySync::Update(const RE::Sky* sky)
 
 	const bool transitionCompleted = immediateTransitionReady;
 	shadowFader.Update(sky, directions, intensities, settings.ShadowTransitionDuration, fadeAdvance, transitionCompleted || resetTransition);
+	celestialLightingValid = true;
 	immediateTransitionReady = false;
 	return transitionCompleted;
 }
@@ -539,6 +561,8 @@ inline void SkySync::SetSunPosition(const RE::Sun* sun, const RE::NiPoint3& dir,
 
 void SkySync::ShadowFader::Reset()
 {
+	lightWeights = float3{ 1.0f, 0.0f, 0.0f };
+	startLightWeights = lightWeights;
 	target = Caster::Sun;
 	previousTarget = Caster::Sun;
 	fadeTimer = 0.0f;
@@ -576,6 +600,7 @@ void SkySync::ShadowFader::Update(const RE::Sky* sky, RE::NiPoint3 dirs[], float
 		best = Caster::Sun;
 	}
 
+	const RE::NiPoint3 celestialTargetDir = best == Caster::None ? RE::NiPoint3{ 0.0f, 0.0f, 1.0f } : dirs[static_cast<int>(best)];
 	LockSunElevation(dirs);
 
 	// No valid caster points straight up so shadows fall directly down.
@@ -588,14 +613,23 @@ void SkySync::ShadowFader::Update(const RE::Sky* sky, RE::NiPoint3 dirs[], float
 		previousTarget = target;
 		target = best;
 		startDir = currentDir;
+		startCelestialDir = celestialDir;
+		startLightWeights = lightWeights;
 		fadeTimer = 0.0f;
 		transitioning = true;
 	}
 
 	const RE::NiPoint3 targetDir = casterDir(target);
+	const float3 targetLightWeights = {
+		target == Caster::Sun ? 1.0f : 0.0f,
+		target == Caster::Masser ? 1.0f : 0.0f,
+		target == Caster::Secunda ? 1.0f : 0.0f
+	};
 
 	if (!transitioning) {
 		currentDir = targetDir;
+		celestialDir = celestialTargetDir;
+		lightWeights = targetLightWeights;
 		vlIntensityFactor = target == Caster::None ? 0.0f : 1.0f;
 		if (target != Caster::None)
 			immediateTransitionRemaining = 0.0f;
@@ -606,6 +640,11 @@ void SkySync::ShadowFader::Update(const RE::Sky* sky, RE::NiPoint3 dirs[], float
 	const float effectiveFadeAdvance = immediateTransitionRemaining > 0.0f ? fadeDuration : fadeAdvance;
 	fadeTimer = std::min(fadeTimer + effectiveFadeAdvance, fadeDuration);
 	const float t = fadeDuration > 0.0f ? fadeTimer / fadeDuration : 1.0f;
+	lightWeights = float3{
+		std::lerp(startLightWeights.x, targetLightWeights.x, t),
+		std::lerp(startLightWeights.y, targetLightWeights.y, t),
+		std::lerp(startLightWeights.z, targetLightWeights.z, t)
+	};
 
 	currentDir = {
 		std::lerp(startDir.x, targetDir.x, t),
@@ -613,9 +652,16 @@ void SkySync::ShadowFader::Update(const RE::Sky* sky, RE::NiPoint3 dirs[], float
 		std::lerp(startDir.z, targetDir.z, t)
 	};
 	currentDir.Unitize();
+	celestialDir = {
+		std::lerp(startCelestialDir.x, celestialTargetDir.x, t),
+		std::lerp(startCelestialDir.y, celestialTargetDir.y, t),
+		std::lerp(startCelestialDir.z, celestialTargetDir.z, t)
+	};
+	celestialDir.Unitize();
 
 	if (t >= 1.0f) {
 		currentDir = targetDir;
+		celestialDir = celestialTargetDir;
 		transitioning = false;
 	}
 

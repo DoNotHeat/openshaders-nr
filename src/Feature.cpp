@@ -7,6 +7,7 @@
 #include "Features/CloudRelight.h"
 #include "Features/CloudShadows.h"
 #include "Features/DynamicCubemaps.h"
+#include "Features/ProceduralSun.h"
 #if defined(ENABLE_EFFECTS11)
 #	include "Features/Effects11.h"
 #endif
@@ -52,6 +53,7 @@
 #include "Features/VolumetricShadows.h"
 #include "Features/WaterEffects.h"
 #include "Features/WetnessEffects.h"
+#include "Features/Wind/Wind.h"
 #include "I18n/I18n.h"
 #include "Menu.h"
 #include "SettingsOverrideManager.h"
@@ -214,6 +216,10 @@ bool Feature::ValidateCache(CSimpleIniA& a_ini)
 
 	if (loaded) {
 		auto versionInCache = a_ini.GetValue(ini_name.c_str(), "Version");
+		if (!versionInCache) {
+			logger::info("No cached version found. Installed {}", version);
+			return false;
+		}
 		if (strcmp(versionInCache, version.c_str()) != 0) {
 			logger::info("Change in version detected. Installed {} but {} in Disk Cache", version, versionInCache);
 			return false;
@@ -252,6 +258,7 @@ namespace
 			&globals::features::dynamicCubemaps,
 			&globals::features::cloudShadows,
 			&globals::features::cloudRelight,
+			&globals::features::proceduralSun,
 			&globals::features::waterEffects,
 			&globals::features::performanceOverlay,
 			&globals::features::subsurfaceScattering,
@@ -276,6 +283,7 @@ namespace
 			&globals::features::csEditor,
 			&globals::features::sceneSelector,
 			&globals::features::csUtility,
+			&globals::features::wind,
 			&globals::features::featureOverwrites,
 			&globals::features::sceneManager,
 			&globals::features::screenshotFeature,
@@ -330,19 +338,32 @@ const std::vector<Feature*>& Feature::GetFeatureList()
 	}
 }
 
+namespace
+{
+	template <typename Predicate>
+	std::vector<Feature*> FilterFeatureList(Predicate&& a_wants)
+	{
+		std::vector<Feature*> v;
+		for (auto* feature : Feature::GetFeatureList()) {
+			if (a_wants(feature))
+				v.push_back(feature);
+		}
+		return v;
+	}
+}
+
 const std::vector<Feature*>& Feature::GetRenderPassHookFeatures()
 {
 	// Built once from the full feature list; VR developer mode's feature-list toggle (see
 	// GetFeatureList() above) won't retroactively add/remove hook features until restart.
-	static const std::vector<Feature*> hookFeatures = [] {
-		std::vector<Feature*> v;
-		for (auto* feature : GetFeatureList()) {
-			if (feature->WantsRenderPassHook())
-				v.push_back(feature);
-		}
-		return v;
-	}();
+	static const std::vector<Feature*> hookFeatures = FilterFeatureList([](Feature* f) { return f->WantsRenderPassHook(); });
 	return hookFeatures;
+}
+
+const std::vector<Feature*>& Feature::GetRenderPassSkipFeatures()
+{
+	static const std::vector<Feature*> skipFeatures = FilterFeatureList([](Feature* f) { return f->WantsRenderPassSkipHook(); });
+	return skipFeatures;
 }
 
 Feature* Feature::FindRegisteredFeatureByShortName(const std::string& shortName)
@@ -427,18 +448,19 @@ void Feature::DrainSceneTransitions()
 
 Feature* Feature::FindFeatureByShortName(const std::string& shortName)
 {
-	for (auto* feature : GetFeatureList()) {
-		if (feature->loaded && feature->GetShortName() == shortName)
-			return feature;
-	}
-	return nullptr;
+	return FindLoadedFeature([&](Feature* f) { return f->GetShortName() == shortName; });
+}
+
+bool Feature::FindSceneExposure(SceneExposure& a_out)
+{
+	return FindLoadedFeature([&](Feature* f) { return f->GetSceneExposure(a_out); }) != nullptr;
 }
 
 std::vector<std::string> Feature::GetLoadedFeatureNames()
 {
 	std::vector<std::string> names;
 	for (auto* feature : GetFeatureList()) {
-		if (feature->loaded && feature->IsInMenu())
+		if (feature->loaded)
 			names.push_back(feature->GetShortName());
 	}
 	std::sort(names.begin(), names.end());
@@ -603,7 +625,7 @@ void Feature::DrawUnloadedUI()
 	if (!failedLoadedMessage.empty()) {
 		// Use error color for all failure messages
 		auto& themeSettings = Menu::GetSingleton()->GetTheme();
-		ImGui::TextColored(themeSettings.StatusPalette.Error, failedLoadedMessage.c_str());
+		ImGui::TextColored(themeSettings.StatusPalette.Error, "%s", failedLoadedMessage.c_str());
 		return;
 	}
 
@@ -613,7 +635,7 @@ void Feature::DrawUnloadedUI()
 	std::string requiredVersion = Feature::GetFeatureRequiredVersion(GetShortName());
 
 	auto missingFileMessage = std::format("The feature file for {} is missing. This feature is not installed! Version required: {}", GetDisplayName(), requiredVersion);
-	ImGui::TextColored(themeSettings.StatusPalette.Error, missingFileMessage.c_str());
+	ImGui::TextColored(themeSettings.StatusPalette.Error, "%s", missingFileMessage.c_str());
 
 	// Also show feature summary if available
 	auto [description, keyFeatures] = GetFeatureSummary();

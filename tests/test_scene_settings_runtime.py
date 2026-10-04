@@ -19,6 +19,96 @@ def braced(source, declaration):
 
 
 class SceneSettingsRuntimeTests(unittest.TestCase):
+    def test_native_embedded_feature_scene_edit_lock(self):
+        library_root = ROOT / "build/ALL/vcpkg_installed/x64-windows-static-md-release"
+        if os.name != "nt" or not (library_root / "lib/imgui.lib").exists():
+            self.skipTest("Uses the Windows build's ImGui library")
+        hooks = (ROOT / "src/SceneSettingsUIHooks.cpp").read_text(encoding="utf-8")
+        source = r'''
+#include <imgui.h>
+#include <imgui_internal.h>
+#include <cstdio>
+#include <cstdlib>
+#include <utility>
+#include <vector>
+#include "GUARD_HEADER"
+struct Feature {};
+struct SceneSettingsManager {
+    static SceneSettingsManager* GetSingleton() { static SceneSettingsManager manager; return &manager; }
+    void CaptureFeatureSceneEditChanges(Feature*) {}
+    void CaptureExternalFeatureChanges(Feature*) {}
+};
+Feature* g_currentFeature = nullptr;
+bool g_sceneSettingsActive = false, g_featureSceneEditing = false, g_featureSettingMutation = false;
+int g_sceneControlledItem = 0, g_cachedBlockedFeatureSceneEditSettings = 0;
+const int* g_blockedFeatureSceneEditSettings = nullptr;
+std::vector<bool> g_sceneControlledGroupStack;
+struct SceneControlFrame {
+    int item;
+    std::vector<bool> groups;
+    const int* blockedEditSettings;
+    bool featureSettingMutation;
+};
+std::vector<SceneControlFrame> g_sceneControlFrames;
+void RefreshBlockedFeatureSceneEditSettings(Feature&) {}
+void ClearControlledItem() { g_sceneControlledItem = 0; }
+namespace SceneSettingsUIHooks {
+CONSTRUCTOR
+DESTRUCTOR
+}
+void check(bool condition, const char* message) {
+    if (!condition) { std::fprintf(stderr, "%s\n", message); std::exit(1); }
+}
+bool drawDisabled() {
+    bool value = false;
+    ImGui::Checkbox("Control", &value);
+    return (GImGui->LastItemData.ItemFlags & ImGuiItemFlags_Disabled) != 0;
+}
+int main() {
+    ImGui::CreateContext();
+    auto& io = ImGui::GetIO();
+    io.IniFilename = nullptr;
+    io.DisplaySize = ImVec2(800, 600);
+    unsigned char* pixels; int width, height;
+    io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
+    ImGui::NewFrame();
+    ImGui::Begin("Fixture");
+    Feature parent, child, grandchild;
+    using SceneSettingsUIHooks::FeatureDrawGuard;
+    for (bool editing : {false, true})
+        for (bool disabled : {false, true})
+            for (bool controlled : {false, true}) {
+                ImGui::BeginDisabled(disabled);
+                const int stackDepth = GImGui->DisabledStackSize;
+                {
+                    FeatureDrawGuard parentGuard(&parent, controlled, editing);
+                    check(drawDisabled() == disabled, "Parent availability is preserved");
+                    const auto* parentBlockedSettings = g_blockedFeatureSceneEditSettings;
+                    {
+                        FeatureDrawGuard childGuard(&child, controlled);
+                        check(drawDisabled() == (disabled || editing), "Embedded controls are gray during parent scene editing");
+                        {
+                            FeatureDrawGuard grandchildGuard(&grandchild, controlled);
+                            check(drawDisabled() == (disabled || editing), "Deeper embedded panels inherit the lock");
+                        }
+                        check(g_currentFeature == &child, "Nested guard restores its owning feature");
+                    }
+                    check(g_currentFeature == &parent && g_featureSceneEditing == editing, "Embedded guard restores parent edit state");
+                    check(g_blockedFeatureSceneEditSettings == parentBlockedSettings, "Parent setting locks survive embedded drawing");
+                    check(drawDisabled() == disabled, "Parent controls regain their previous availability");
+                }
+                check(GImGui->DisabledStackSize == stackDepth, "Feature guards balance the ImGui disabled stack");
+                check(!g_currentFeature && !g_featureSceneEditing && !g_sceneSettingsActive, "Feature guards restore outer state");
+                ImGui::EndDisabled();
+            }
+    ImGui::End(); ImGui::Render(); ImGui::DestroyContext();
+}
+'''
+        source = source.replace("GUARD_HEADER", (ROOT / "src/SceneSettingsUIHooks.h").as_posix())
+        source = source.replace("CONSTRUCTOR", braced(hooks, "FeatureDrawGuard::FeatureDrawGuard("))
+        source = source.replace("DESTRUCTOR", braced(hooks, "FeatureDrawGuard::~FeatureDrawGuard("))
+        self.compile_and_run(source, imgui_root=library_root)
+
     def test_native_toolbar_loading_and_overwrite_locks(self):
         manager = MANAGER_PATH.read_text(encoding="utf-8")
         source = r'''
@@ -40,7 +130,7 @@ std::string NormalizeLocationFormKey(const std::string& key) { return key; }
 struct SceneSettingsManager {
     enum class SceneContextType { Interior, Location };
     struct Context { SceneContextType type = SceneContextType::Interior; int locationType = 0; std::string locationFormKey; };
-    struct Edit { Context context; };
+    struct Edit { Context context; bool previewEnabled = true; };
     struct Target { int type; std::string formKey; };
     std::optional<Edit> featureSceneEdit{std::in_place};
     std::vector<Target> targets;
@@ -82,6 +172,14 @@ int main() {
     check(!manager.IsFeatureSceneEditPreviewActive(), "Location preview stays inactive outside its target");
     manager.targets.push_back({1, "Fixture"});
     check(manager.IsFeatureSceneEditPreviewActive(), "Location preview resumes inside its target");
+    manager.featureSceneEdit->previewEnabled = false;
+    check(!manager.IsFeatureSceneEditPreviewActive(), "Hidden location draft stays suspended inside its target");
+    manager.targets.clear();
+    check(!manager.IsFeatureSceneEditPreviewActive(), "Travel cannot reactivate a hidden location draft");
+    manager.featureSceneEdit->context.type = SceneSettingsManager::SceneContextType::Interior;
+    check(!manager.IsFeatureSceneEditPreviewActive(), "Non-location draft also stays suspended while hidden");
+    manager.featureSceneEdit->previewEnabled = true;
+    check(manager.IsFeatureSceneEditPreviewActive(), "Reopening resumes a valid preview");
 }
 '''
         for token, declaration in {
@@ -140,6 +238,7 @@ bool IsSceneControllable(const SettingMetadata&) { return true; }
 }
 struct Feature { std::string_view GetShortName() const { return "Fixture"; } } feature;
 Feature* g_currentFeature = &feature;
+bool g_featureSceneEditing = true;
 bool ShouldBlockSetting(const SceneSettingsCatalog::SettingMetadata& value) { return value.blocked; }
 bool ShouldOutlineSetting(const SceneSettingsCatalog::SettingMetadata& value) { return value.outlined; }
 namespace Util { float GetUIScale() { return 1.0f; } }
@@ -148,8 +247,8 @@ void ClearControlledItem() {}
 void FinishControlledItem() {}
 bool TrackFeatureSettingMutation(bool changed) { return changed; }
 MATCHING
-const SceneSettingsCatalog::SettingMetadata* FindControlSetting(const char* label, const void*) {
-    return FindUniqueBlockedSettingForLabel(label, false);
+const SceneSettingsCatalog::SettingMetadata* FindControlSetting(const char* label, const void*, bool choices, bool* metadataMatched) {
+    return FindUniqueBlockedSettingForLabel(label, choices, metadataMatched);
 }
 DRAWING
 void check(bool condition, const char* message) {
@@ -262,7 +361,10 @@ unsigned int g_controlDetourDepth = 0;
 std::unordered_set<const Setting*> g_cachedAlteredFeatureSceneEditSettings;
 const Setting* matched = nullptr;
 bool blocked = false;
-const Setting* FindControlSetting(const char*, const void*) { return matched; }
+const Setting* FindControlSetting(const char*, const void*, bool, bool* metadataMatched) {
+    *metadataMatched = matched != nullptr;
+    return matched;
+}
 bool ShouldBlockSetting(const Setting&) { return blocked; }
 void ClearControlledItem() {}
 void FinishControlledItem() {}
@@ -380,10 +482,11 @@ namespace Util {
 GUARD;
 GUARD_BEGIN
 GUARD_END
-bool BeginSearchableCombo(const char* id, const char* preview, ImGuiComboFlags flags, const void*) { return ImGui::BeginCombo(id, preview, flags); }
+bool BeginSearchableCombo(const char* id, const char* preview, ImGuiComboFlags flags, const void*, int, float*) { return ImGui::BeginCombo(id, preview, flags); }
 bool SearchableComboMatches(const std::string&) { return true; }
 void EndSearchableCombo() { ImGui::EndCombo(); }
 }
+float* GetPickerScrollPosition(const char*) { static float scrollY = 0; return &scrollY; }
 EDITOR
 void check(bool condition, const char* message) {
     if (!condition) { std::fprintf(stderr, "%s\n", message); std::exit(1); }
@@ -1153,7 +1256,8 @@ struct ConfirmationPopup {
 }
 struct SceneSettingsManager {
     std::string owner;
-    bool pending = false, overwritesPaused = false;
+    bool pending = false, overwritesPaused = false, previewEnabled = true;
+    void SetFeatureSceneEditPreviewEnabled(bool enabled) { previewEnabled = enabled; }
     int value = 1, stored = 1, begins = 0, ends = 0, saves = 0;
     static SceneSettingsManager* GetSingleton() { static SceneSettingsManager instance; return &instance; }
     static std::string GetFeatureDisplayName(const std::string& feature) { return feature; }
@@ -1166,20 +1270,22 @@ struct SceneSettingsManager {
     }
     bool BeginFeatureSceneEdit(Feature* feature, int) { ++begins; owner = feature->name; return true; }
 };
+struct FeatureSceneTargetState { int type = 0; };
 struct FeaturePageEditorState {
     std::string featureShortName;
     bool toolbarOpen = false;
     std::string pendingFeatureShortName;
     Util::ConfirmationPopup replaceEditor;
     std::vector<int> supportedTypes;
-    int edit = 0;
+    FeatureSceneTargetState edit;
     std::optional<int> activeContext;
 };
 FeaturePageEditorState s_featurePageEditor;
 bool CanEditFeaturePage(Feature* feature) { return feature && feature->supported; }
 std::vector<int> GetFeatureSceneContextTypes(const std::string&) { return {1}; }
-void InitializeFeatureSceneTarget(Feature*, int& edit) { edit = 1; }
-std::optional<int> GetFeatureSceneContext(int edit) { return edit; }
+void InitializeFeatureSceneTarget(Feature*, FeatureSceneTargetState& edit) { edit.type = 1; }
+std::optional<int> GetFeatureSceneContext(const FeatureSceneTargetState& edit) { return edit.type; }
+void ResetPickerScrollPositions() {}
 void InitializeFeatureCopyDestination(FeaturePageEditorState&) {}
 bool environmentPlaying = false;
 bool SetFeaturePagePreviewPlaying(bool playing) { environmentPlaying = playing; return true; }
@@ -1204,9 +1310,11 @@ int main() {
     check(manager->value == 9 && manager->pending && manager->overwritesPaused, "Navigation preserves draft and overwrite bypass");
     const int begins = manager->begins;
     HideFeaturePageEditing();
-    check(!IsFeaturePageEditing(&first) && manager->pending && manager->value == 9, "Hiding the toolbar retains the draft preview");
-    check(environmentPlaying, "Hiding the toolbar keeps weather/time preview running");
+    check(!IsFeaturePageEditing(&first) && manager->pending && manager->value == 9, "Hiding the toolbar retains unsaved draft values");
+    check(!manager->previewEnabled && !environmentPlaying, "Hiding suspends settings and environment previews");
     check(BeginFeaturePageEditing(&first) && manager->begins == begins, "Reopening same feature resumes without restarting its context");
+    check(manager->previewEnabled, "Reopening resumes the retained settings preview");
+    environmentPlaying = true;
     check(!BeginFeaturePageEditing(&unsupported) && manager->owner == first.name, "Unsupported target leaves current draft intact");
     check(!BeginFeaturePageEditing(&second) && state.replaceEditor.IsOpen(), "Unsaved changes require confirmation before replacing the editor");
     DrawFeaturePageEditConfirmation(&second);
@@ -1265,7 +1373,7 @@ Menu* menu = nullptr;
 State* state = nullptr;
 }
 struct SceneSettingsManager {
-    struct Edit { std::string featureShortName; bool overwritesPaused = true; int value = 9; };
+    struct Edit { std::string featureShortName; bool overwritesPaused = true; int value = 9; bool previewEnabled = true; };
     struct Address {
         std::string featureShortName;
         std::vector<std::string> path;
@@ -1277,16 +1385,19 @@ struct SceneSettingsManager {
     std::map<Address, int> appliedSettings;
     bool resolverDirty = false;
     int lastUpdateFrame = -1, stores = 0;
+    unsigned long long featureSceneEditRevision = 0;
     int savedValue = 2, liveValue = 2;
     bool overwritePresent = false;
     std::atomic_bool queuedLoadingTransition = false;
     bool StoreFeatureSceneEdit() { ++stores; savedValue = liveValue; return true; }
     void ResolveAndApply(bool = false) {
-        liveValue = featureSceneEdit ? featureSceneEdit->value : overwritePresent ? 6 : savedValue;
+        liveValue = featureSceneEdit && featureSceneEdit->previewEnabled ? featureSceneEdit->value : overwritePresent ? 6 : savedValue;
     }
     void VerifyPendingApplies(bool = false) {}
     void FlushDeferredSceneChanges() {}
     void OnLoadingTransition() { ResolveAndApply(true); }
+    void ReapplyIfActive(bool) { ResolveAndApply(true); }
+    void SetFeatureSceneEditPreviewEnabled(bool enabled);
     void EndFeatureSceneEdit(bool storeChanges);
     void Update();
     void draft() {
@@ -1300,6 +1411,7 @@ struct SceneSettingsManager {
     }
 };
 END_EDIT
+SET_PREVIEW
 UPDATE
 void check(bool value, const char* message) {
     if (!value) { std::fprintf(stderr, "%s\n", message); std::exit(1); }
@@ -1343,6 +1455,22 @@ int main() {
     ++state.frameCount;
     manager.Update();
     check(manager.stores == 1 && manager.savedValue == 9 && manager.liveValue == 12, "Closing retains edits after the last explicit save without saving them");
+    manager.draft();
+    manager.overwritePresent = true;
+    const int saves = manager.stores;
+    manager.SetFeatureSceneEditPreviewEnabled(false);
+    check(manager.liveValue == 6 && manager.featureSceneEdit->value == 9, "Closing restores saved overrides without discarding the draft");
+    check(manager.featureSceneEdit->overwritesPaused && manager.stores == saves, "Closing retains bypass preference and never saves");
+    const auto revision = manager.featureSceneEditRevision;
+    manager.SetFeatureSceneEditPreviewEnabled(false);
+    check(manager.featureSceneEditRevision == revision, "Repeated hiding is a no-op");
+    manager.overwritePresent = false;
+    manager.savedValue = 3;
+    manager.ResolveAndApply();
+    check(manager.liveValue == 3 && manager.featureSceneEdit->value == 9, "Normal scene changes do not overwrite the hidden draft");
+    manager.SetFeatureSceneEditPreviewEnabled(true);
+    check(manager.liveValue == 9 && manager.stores == saves, "Reopening reapplies the draft without saving");
+    check(manager.featureSceneEditRevision > revision, "Resume invalidates cached control restrictions");
     for (bool store : {false, true}) {
         SceneSettingsManager bypassed;
         bypassed.overwritePresent = true;
@@ -1353,6 +1481,7 @@ int main() {
     }
 }
 '''.replace("END_EDIT", braced(manager, "void SceneSettingsManager::EndFeatureSceneEdit("))
+        source = source.replace("SET_PREVIEW", braced(manager, "void SceneSettingsManager::SetFeatureSceneEditPreviewEnabled("))
         source = source.replace("UPDATE", braced(manager, "void SceneSettingsManager::Update("))
         self.compile_and_run(source)
 

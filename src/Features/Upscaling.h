@@ -197,6 +197,8 @@ public:
 	{
 		return IsFrameGenerationDx12PathActive() && settings.frameGenerationMode != 0;
 	}
+	/** @brief Returns whether settings and menu state permit preparing frame-generation inputs. */
+	bool ShouldPrepareFrameGeneration() const;
 	bool ShouldUseFrameGenerationThisFrame() const;
 	bool IsUpscalingActive() const;
 

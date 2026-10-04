@@ -1,6 +1,16 @@
 #ifndef LIGHTING_COMMON_HLSLI
 #define LIGHTING_COMMON_HLSLI
 
+#include "Common/Math.hlsli"
+
+#if defined(SKIN) && defined(CS_SKIN) && !defined(TRUE_PBR)
+#	define CS_SKIN_SHADING
+#endif
+
+#if defined(HAIR) && defined(CS_HAIR) && !defined(TRUE_PBR)
+#	define CS_HAIR_SHADING
+#endif
+
 struct DirectContext
 {
 	float3 worldNormal;
@@ -17,7 +27,7 @@ struct DirectContext
 	float3 coatLightDir;
 	float3 coatHalfVector;
 	float3 coatLightColor;
-#elif defined(HAIR) && defined(CS_HAIR)
+#elif defined(CS_HAIR_SHADING)
 	float hairShadow;
 #endif
 };
@@ -71,7 +81,7 @@ struct MaterialProperties
 #	endif
 	float Roughness;
 	float3 F0;
-#	if defined(CS_SKIN) && defined(SKIN)
+#	if defined(CS_SKIN_SHADING)
 	float RoughnessSecondary;
 	float SecondarySpecIntensity;
 	float Curvature;
@@ -111,6 +121,12 @@ namespace Foliage
 		static const float Wrap = 0.5f;
 		static const float ScatterRoughness = 0.6f;
 		static const float Pi = 3.14159265f;
+	}
+
+	float GetDirectionalShadowScale(float detailedShadow, float directionalCoverage)
+	{
+		// The lit cascade fallback must not contribute to foliage transmission.
+		return max(detailedShadow - (1.0 - directionalCoverage), 0.0) / max(detailedShadow, EPSILON_DIVISION);
 	}
 }
 
