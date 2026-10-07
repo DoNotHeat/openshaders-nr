@@ -320,10 +320,6 @@ struct FoveatedRender
 	// Eye tracking foveation: update gaze data and apply dynamic offset
 	void UpdateEyeTrackingFoveation();
 
-	// Debug overlay: draw the gaze crosshair (and optional vignette mask) onto
-	// the final VR SBS frame. Skeleton-stage validation of the gaze pipeline.
-	void DrawGazeDebugOverlay();
-
 	// Main enable: latched at boot, change requires restart
 	void LatchEnabled() { enabledAtBoot = (settings.enabled != 0); }
 

@@ -99,7 +99,6 @@ struct VRStereoOptimizations
 		float foveatedRegionRadius = 0.3f;
 		float foveatedRegionCenterX = 0.5f;
 		float foveatedRegionCenterY = 0.5f;
-		bool useEyeTracking = false;
 
 		// Debug controls
 		bool debugSkipMerge = false;

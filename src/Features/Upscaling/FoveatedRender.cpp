@@ -544,15 +544,6 @@ void FoveatedRender::UpdateEyeTrackingFoveation()
 	eyeTrackingData.isValid = true;
 }
 
-// The gaze debug overlay is drawn inside the foveated stretch pass
-	// (SubrectStretchCS.hlsl), i.e. the same compute shader that renders the
-	// red "Visualize regions" tint — the proven path to the final frame for
-	// this foveation route. This dedicated method is intentionally unused; it
-	// would paint kVR_FRAMEBUFFER too late (kMAIN is already folded into it).
-void FoveatedRender::DrawGazeDebugOverlay()
-{
-}
-
 void FoveatedRender::LatchQualityMode()
 {
 	qualityModeAtBoot = std::clamp(globals::features::upscaling.settings.qualityMode, 1u, 4u);

@@ -64,7 +64,6 @@ void VRStereoOptimizations::SaveSettings(json& o_json)
 	o_json["FoveatedRegionRadius"] = settings.foveatedRegionRadius;
 	o_json["FoveatedRegionCenterX"] = settings.foveatedRegionCenterX;
 	o_json["FoveatedRegionCenterY"] = settings.foveatedRegionCenterY;
-	o_json["UseEyeTracking"] = settings.useEyeTracking;
 	o_json["DebugSkipMerge"] = settings.debugSkipMerge;
 	o_json["DebugDepthMap"] = settings.debugDepthMap;
 	o_json["DirectionalOcclusionRatio"] = settings.directionalOcclusionRatio;
@@ -104,7 +103,6 @@ void VRStereoOptimizations::LoadSettings(json& o_json)
 	loadBool("ReclassifyAfterRepair", settings.reclassifyAfterRepair);
 	loadBool("ClassifyWithDepthHistory", settings.classifyWithDepthHistory);
 
-	loadBool("UseEyeTracking", settings.useEyeTracking);
 	loadBool("DebugSkipMerge", settings.debugSkipMerge);
 	loadBool("DebugDepthMap", settings.debugDepthMap);
 }
